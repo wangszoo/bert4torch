@@ -1,342 +1,25 @@
+''' 模型
+    v0.2.2版本前Trainer是在bert4torch内部实现的，之后单独为Trainer做了一个包torch4keras
+    v0.2.5版本开始，对抗训练模块不在complile中使用，而是用callback方式实现
+'''
 import torch
 import torch.nn as nn
 import copy
 import json
 import re
 from bert4torch.layers import LayerNorm, BertEmbeddings, BertLayer, Identity, T5Layer, GatedAttentionUnit, XlnetLayer
-from bert4torch.layers import AdaptiveEmbedding, XlnetPositionsEncoding
-from bert4torch.snippets import metric_mapping, search_layer, insert_arguments, delete_arguments, get_kw
-from bert4torch.snippets import ProgbarLogger, EarlyStopping, FGM, PGD, VAT, IterDataset, take_along_dim
+from bert4torch.layers import AdaptiveEmbedding, XlnetPositionsEncoding, ConvLayer
+from bert4torch.snippets import insert_arguments, delete_arguments, get_kw, torch_div
+from bert4torch.snippets import take_along_dim, create_position_ids_from_input_ids
 from bert4torch.activations import get_activation
 import warnings
+from torch4keras.model import *
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 
-class BaseModel(nn.Module):
-    def __init__(self):
-        super(BaseModel, self).__init__()
-        # 这里主要是为了外面调用用到
-        self.global_step, self.local_step, self.total_steps, self.epoch, self.train_dataloader = 0, 0, 0, 0, None
-        self.callbacks = []
-    
-    def compile(self, loss, optimizer, scheduler=None, max_grad_norm=None, use_amp=False, metrics=None, adversarial_train={'name': ''}):
-        '''定义loss, optimizer, metrics, 是否在计算loss前reshape
-        loss: loss
-        optimizer: 优化器
-        scheduler: scheduler
-        max_grad_norm: 是否使用梯度裁剪, 默认不启用
-        use_amp: 是否使用混合精度，默认不启用
-        metrics: 训练过程中需要打印的指标, loss相关指标默认会打印, 目前支持accuracy
-        '''
-        self.criterion = loss
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-        self.max_grad_norm = max_grad_norm
-        self.use_amp = use_amp
-        if use_amp:
-            assert adversarial_train['name'] not in {'vat', 'gradient_penalty'}, 'Amp and adversarial_train both run is not supported in current version'
-            from torch.cuda.amp import autocast
-            self.autocast = autocast
-            self.scaler = torch.cuda.amp.GradScaler()
-
-        if metrics is None:
-            metrics = []
-        self.metrics = ['loss'] + [i for i in metrics if i!='loss']
-        
-        # 对抗训练
-        self.adversarial = adversarial_train
-        self.adversarial_initialize()
-
-    def adversarial_initialize(self):
-        '''对抗训练初始化
-        '''
-        assert self.adversarial['name'] in {'', 'fgm', 'pgd', 'vat', 'gradient_penalty'}, 'adversarial_train support fgm, pgd, vat and gradient_penalty mode'
-        self.adversarial['epsilon'] = self.adversarial.get('epsilon', 1.0)
-        self.adversarial['emb_name'] = self.adversarial.get('emb_name', 'word_embeddings')
-
-        if self.adversarial['name'] == 'fgm':
-            self.ad_train = FGM(self)
-        elif self.adversarial['name'] == 'pgd':
-            self.adversarial['K'] = self.adversarial.get('K', 3)  # 步数
-            self.adversarial['alpha'] = self.adversarial.get('alpha', 0.3)  # 学习率
-            self.ad_train = PGD(self)
-        elif self.adversarial['name'] == 'gradient_penalty':
-            pass
-        elif self.adversarial['name'] == 'vat':
-            self.adversarial['K'] = self.adversarial.get('K', 3)
-            self.adversarial['noise_var'] = self.adversarial.get('noise_var', 1e-5)  # 噪声的方差
-            self.adversarial['noise_gamma'] = self.adversarial.get('noise_gamma', 1e-6) # eps
-            self.adversarial['adv_step_size'] = self.adversarial.get('adv_step_size', 1e-3)  # 学习率
-            self.adversarial['adv_alpha'] = self.adversarial.get('adv_alpha', 1)  # 对抗loss的权重
-            self.adversarial['norm_type'] = self.adversarial.get('norm_type', 'l2')  # 归一化方式
-            self.ad_train = VAT(self, **self.adversarial)
-
-    def adversarial_training(self, train_X, train_y, output, loss, loss_detail, grad_accumulation_steps):
-        '''对抗训练
-        '''
-        if self.adversarial['name'] == 'fgm':
-            self.ad_train.attack(**self.adversarial) # embedding被修改了
-            output, loss, loss_detail = self.train_step(train_X, train_y, grad_accumulation_steps)
-            loss.backward() # 反向传播，在正常的grad基础上，累加对抗训练的梯度
-            # 恢复Embedding的参数, 因为要在正常的embedding上更新参数，而不是增加了对抗扰动后的embedding上更新参数~
-            self.ad_train.restore(**self.adversarial)
-        elif self.adversarial['name'] == 'pgd':
-            self.ad_train.backup_grad()  # 备份梯度
-            for t in range(self.adversarial['K']):
-                # 在embedding上添加对抗扰动, first attack时备份param.data
-                self.ad_train.attack(**self.adversarial, is_first_attack=(t==0))
-                if t != self.adversarial['K']-1:
-                    self.optimizer.zero_grad()  # 为了累积扰动而不是梯度
-                else:
-                    self.ad_train.restore_grad() # 恢复正常的grad
-                output, loss, loss_detail = self.train_step(train_X, train_y, grad_accumulation_steps)
-                loss.backward() # 反向传播，在正常的grad基础上，累加对抗训练的梯度
-            self.ad_train.restore(**self.adversarial) # 恢复embedding参数
-        # 梯度惩罚
-        elif self.adversarial['name'] == 'gradient_penalty':
-            para = search_layer(self, self.adversarial['emb_name'], retrun_first=True)
-            gp = (para.grad ** 2).sum()
-            loss += 0.5 * gp * self.adversarial['epsilon']
-            loss.backward()
-        # 虚拟对抗训练
-        elif self.adversarial['name'] == 'vat':
-            logit = output[0] if isinstance(output, (list, tuple)) else output
-            adv_loss = self.ad_train.virtual_adversarial_training(train_X, logit)
-            loss_detail.update({'loss_sup': loss.item(), 'loss_unsup': adv_loss})
-            loss += (adv_loss if adv_loss else 0)
-            loss.backward()
-
-        return loss, loss_detail
-
-    def train_step(self, train_X, train_y, grad_accumulation_steps):
-        '''forward并返回loss
-        '''
-        def args_segmentate(train_X):
-            '''参数是否展开
-            '''
-            if isinstance(train_X, torch.Tensor):  # tensor不展开
-                pass
-            elif isinstance(self, (BaseModelDP, BaseModelDDP)):
-                if self.module.forward.__code__.co_argcount >= 3:
-                    return True
-            elif self.forward.__code__.co_argcount >= 3:
-                return True
-            return False
-
-        if self.use_amp:
-            with self.autocast():
-                output = self.forward(*train_X) if args_segmentate(train_X) else self.forward(train_X)
-                loss_detail = self.criterion(output, train_y)
-        else:
-            output = self.forward(*train_X) if args_segmentate(train_X) else self.forward(train_X)
-            loss_detail = self.criterion(output, train_y)
-
-        if isinstance(loss_detail, torch.Tensor):
-            loss = loss_detail
-            loss_detail = {}
-        elif isinstance(loss_detail, dict):
-            loss = loss_detail['loss']  # 还存在其他loss，仅用于打印
-            del loss_detail['loss']
-        elif isinstance(loss_detail, (tuple, list)):
-            loss = loss_detail[0]
-            loss_detail = {f'loss{i}':v for i, v in enumerate(loss_detail[1:], start=1)}
-        else:
-            raise ValueError('Return loss only support Tensor/dict/tuple/list format')
-        # 梯度累积
-        loss = loss / grad_accumulation_steps if grad_accumulation_steps > 1 else loss
-        return output, loss, loss_detail
-
-    def callback_fun(self, mode, logs={}):
-        '''统一调用callback, 方便一些判断条件的触发
-        '''
-        # 如果是分布式DDP训练，则仅masker_rank可以callback
-        if isinstance(self, BaseModelDDP) and self.master_rank!=torch.distributed.get_rank():
-            return
-
-        if mode == 'train_begin':
-            for callback in self.callbacks:
-                callback.on_train_begin()
-        elif mode == 'epoch_begin':
-            for callback in self.callbacks:
-                callback.on_epoch_begin(self.global_step, self.epoch, logs)
-        elif mode == 'batch_begin':
-            for callback in self.callbacks:
-                callback.on_batch_begin(self.global_step, self.local_step, logs)
-        elif mode == 'batch_end':
-            for callback in self.callbacks:
-                callback.on_batch_end(self.global_step, self.local_step, logs)
-        elif mode == 'epoch_end':
-            for callback in self.callbacks:
-                callback.on_epoch_end(self.global_step, self.epoch, logs)
-        elif mode == 'train_end':
-            for callback in self.callbacks:
-                callback.on_train_end()
-        elif mode == 'dataloader_end':
-            for callback in self.callbacks:
-                callback.on_dataloader_end()
-
-    def fit(self, train_dataloader, steps_per_epoch=None, epochs=1, grad_accumulation_steps=1, callbacks=[]):
-        if isinstance(train_dataloader.dataset, IterDataset):
-            assert steps_per_epoch is not None, 'IterDataset should specify steps_per_epoch'
-        steps_per_epoch = len(train_dataloader) if steps_per_epoch is None else steps_per_epoch
-        self.total_steps = steps_per_epoch * epochs
-        self.global_step = 0
-        self.train_dataloader = train_dataloader  # 设置为成员变量，可由外部的callbacks进行修改
-        train_dataloader_iter = iter(self.train_dataloader)  # 循环epoch时不重生成
-
-        self.callbacks = [ProgbarLogger(epochs, steps_per_epoch, self.metrics)] + (callbacks if isinstance(callbacks, (list, tuple)) else [callbacks])
-        self.callback_fun('train_begin')
-
-        # epoch：当前epoch
-        # global_step：当前全局训练步数
-        # local_step: 当前epoch内的训练步数，不同epoch中相同local_step对应的batch数据不一定相同，在steps_per_epoch=None时相同
-        # bti：在dataloader中的index，不同epoch中相同的bti对应的batch数据一般相同，除非重新生成dataloader
-        self.bti = 0
-        for epoch in range(epochs):
-            self.epoch = epoch
-            self.callback_fun('epoch_begin')
-            for local_step in range(steps_per_epoch):
-                self.local_step = local_step
-                # 循环dataloader, 不要试用itertools的cycle，遇到过变量不释放的问题
-                try:
-                    batch = next(train_dataloader_iter)
-                except StopIteration:
-                    self.callback_fun('dataloader_end')  # 适用于数据量较大时，动态读取文件并重新生成dataloader的情况，如预训练
-                    train_dataloader_iter = iter(self.train_dataloader)  # shuffle=True时候，其实顺序也重新生成了
-                    self.bti = 0
-                    batch = next(train_dataloader_iter)
-                train_X, train_y = batch
-
-                # 取btz，最多允许嵌套两层，即((token_ids1, mask1), (token_ids2, mask2))
-                if isinstance(train_X, (list, tuple)):
-                    if isinstance(train_X[0], (list, tuple)):
-                        btz = train_X[0][0].size(0)
-                    else:
-                        btz = train_X[0].size(0)
-                elif isinstance(train_X, torch.Tensor):
-                    btz = train_X.size(0)
-                else:
-                    raise ValueError('Input only support [list, tuple, tensor]')
-                logs = {'batch': self.local_step, 'size': btz}
-                self.callback_fun('batch_begin', logs)
-
-                self.train()  # 设置为train模式
-                # 入参个数判断，如果入参>=3表示是多个入参，如果=2则表示是一个入参
-                output, loss, loss_detail = self.train_step(train_X, train_y, grad_accumulation_steps)
-                
-                retain_graph = True if self.adversarial['name'] in {'gradient_penalty', 'vat'} else False
-                if self.use_amp:  # 混合精度
-                    scale_before_step = self.scaler.get_scale()
-                    self.scaler.scale(loss).backward(retain_graph=retain_graph)
-                else:
-                    loss.backward(retain_graph=retain_graph)
-
-                # 对抗训练
-                loss, loss_detail = self.adversarial_training(train_X, train_y, output, loss, loss_detail, grad_accumulation_steps)
-                
-                # 参数更新, 真实的参数更新次数要除以grad_accumulation_steps，注意调整总的训练步数
-                if (self.global_step+1) % grad_accumulation_steps == 0:
-                    skip_scheduler = False
-                    # 混合精度
-                    if self.use_amp:
-                        self.scaler.unscale_(self.optimizer)
-                        if self.max_grad_norm is not None:  # 梯度裁剪
-                            torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        skip_scheduler = self.scaler.get_scale() != scale_before_step
-                    else:
-                        if self.max_grad_norm is not None:  # 梯度裁剪
-                            torch.nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
-                        self.optimizer.step()
-
-                    self.optimizer.zero_grad()  # 清梯度
-                    if (self.scheduler is not None) and not skip_scheduler:
-                        self.scheduler.step()
-
-                # 添加log打印
-                logs.update({'loss': loss.item()})
-                logs_loss_detail = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in loss_detail.items()}
-                logs.update(logs_loss_detail)
-                if self.global_step == 0:
-                    self.callbacks[0].add_metrics(list(logs_loss_detail.keys()), add_position=1)
-                for metric in self.metrics:
-                    tmp = metric_mapping(metric, output, train_y)  # 内置的一些accuracy指标
-                    if tmp is not None:
-                        logs[metric] = tmp
-                self.callback_fun('batch_end', logs)
-
-                self.bti += 1
-                self.global_step += 1
-            self.callback_fun('epoch_end', logs)
-            # earlystop策略
-            callback_tmp = [callback_tmp for callback_tmp in self.callbacks if isinstance(callback_tmp, EarlyStopping)]
-            if callback_tmp and callback_tmp[0].stopped_epoch > 0:
-                break
-        self.callback_fun('train_end', logs)
-
-    @torch.no_grad()
-    def predict(self, input_tensor_list, return_all=None):
-        self.eval()
-        if self.forward.__code__.co_argcount >= 3:
-            output = self.forward(*input_tensor_list)
-        else:
-            output = self.forward(input_tensor_list)
-        if return_all is None:
-            return output
-        elif isinstance(output, (tuple, list)) and isinstance(return_all, int) and return_all < len(output):
-            return output[return_all]
-        else:
-            raise ValueError('Return format error')
-    
-    def load_weights(self, load_path, strict=True, prefix=None):
-        state_dict = torch.load(load_path, map_location='cpu')
-        if prefix is None:
-            self.load_state_dict(state_dict, strict=strict)
-        else:
-            # 加载save_weights中to_raw_format=True的情形
-            eval_str = 'self.variable_mapping()' if prefix == '' else f'self.{prefix}.variable_mapping()'
-            mapping = {v:k for k, v in eval(eval_str).items()}
-            mapping = mapping if prefix == '' else {k:f'{prefix}.{v}' for k,v in mapping.items()}
-            state_dict_raw = {}
-            for k, v in state_dict.items():
-                k = mapping.get(k, k)
-                state_dict_raw[k] = v
-            self.load_state_dict(state_dict_raw, strict=strict)
-
-    def save_weights(self, save_path, prefix=None):
-        if prefix is None:
-            torch.save(self.state_dict(), save_path)
-        else:  
-            # 按照variable_mapping()中原始的key保存，方便其他官方代码加载模型
-            eval_str = 'self.variable_mapping()' if prefix == '' else f'self.{prefix}.variable_mapping()'
-            mapping = eval(eval_str)
-            mapping = mapping if prefix == '' else {f'{prefix}.{k}':v for k,v in mapping.items()}
-            state_dict_raw = {}
-            for k, v in self.state_dict().items():
-                k = mapping.get(k, k)
-                state_dict_raw[k] = v
-            torch.save(state_dict_raw, save_path)
-    
-
-class BaseModelDP(BaseModel, nn.DataParallel):
-    '''DataParallel模式使用多gpu的方法
-    '''
-    def __init__(self, *args, **kwargs):
-        nn.DataParallel.__init__(self, *args, **kwargs)
-
-
-class BaseModelDDP(BaseModel, nn.parallel.DistributedDataParallel):
-    '''DistributedDataParallel模式使用多gpu的方法
-    '''
-    def __init__(self, *args, master_rank=0, **kwargs):
-        self.master_rank = master_rank  # 用于记录打印条的rank
-        nn.parallel.DistributedDataParallel.__init__(self, *args, **kwargs)
-
-
-class BERT_BASE(BaseModel):
+class BERT_BASE(nn.Module):
     """模型基类
     """
-
     def __init__(
             self,
             vocab_size,  # 词表大小
@@ -358,6 +41,7 @@ class BERT_BASE(BaseModel):
             ignore_invalid_weights=False,  # 允许跳过不存在的权重
             keep_hidden_layers=None, # 保留的hidden_layer层的id
             hierarchical_position=None,  # 是否层次分解位置编码
+            gradient_checkpoint=False, # 是否使用gradient_checkpoint
             **kwargs
     ):
         super(BERT_BASE, self).__init__()
@@ -387,6 +71,7 @@ class BERT_BASE(BaseModel):
         self.ignore_invalid_weights = ignore_invalid_weights
         self.keep_hidden_layers = set(range(num_hidden_layers)) if keep_hidden_layers is None else set(keep_hidden_layers)
         self.hierarchical_position = hierarchical_position
+        self.gradient_checkpoint = gradient_checkpoint
 
     def build(
         self,
@@ -400,6 +85,7 @@ class BERT_BASE(BaseModel):
         """模型构建函数
         attention_caches: 为Attention的K,V的缓存序列字典，格式为{Attention层名: [K缓存, V缓存]}；
         layer_norm_*系列参数: 实现Conditional Layer Normalization时使用，用来实现以“固定长度向量”为条件的条件Bert。
+        说明：其他参数目前暂未使用到，但是逻辑暂时保留
         """
         # additional_input
         # if additional_input_layers is not None:
@@ -416,7 +102,6 @@ class BERT_BASE(BaseModel):
         #     layer_norm_cond_hidden_act or 'linear',
         # ]
         self.output_all_encoded_layers = kwargs.get('output_all_encoded_layers', False)
-        
 
     def forward(self, inputs):
         """定义模型的执行流程
@@ -428,6 +113,11 @@ class BERT_BASE(BaseModel):
         # Final
         outputs = self.apply_final_layers(outputs)
         return outputs
+
+    @torch.no_grad()
+    def predict(self, inputs):
+        self.eval()
+        return self.forward(inputs)
 
     def init_model_weights(self, module):
         """ 初始化权重
@@ -451,7 +141,7 @@ class BERT_BASE(BaseModel):
         """
         return {}
 
-    def load_load_variable(self):
+    def load_variable(self):
         raise NotImplementedError
 
     def load_embeddings(self, embeddings):
@@ -481,7 +171,8 @@ class BERT_BASE(BaseModel):
             embeddings = embeddings / (1 - alpha)
             position_index = torch.arange(self.max_position)[:, None]
             # 为兼容低版本pytorch没有take_along_dim
-            embeddings_x = take_along_dim(embeddings,  torch.div(position_index, embeddings.size(0), rounding_mode='trunc'), dim=0)
+            embeddings_x = take_along_dim(embeddings,  torch_div(position_index, embeddings.size(0), rounding_mode='trunc'), dim=0)  # 兼容老版本
+            # embeddings_x = take_along_dim(embeddings,  torch.div(position_index, embeddings.size(0), rounding_mode='trunc'), dim=0)
             embeddings_y = take_along_dim(embeddings, position_index % embeddings.size(0), dim=0)
             embeddings = alpha * embeddings_x + (1 - alpha) * embeddings_y
 
@@ -520,14 +211,6 @@ class BERT_BASE(BaseModel):
 
         # 将ckpt的权重load到模型结构中
         self.load_state_dict(state_dict_new, strict=False)
-    
-    # def get_inputs(self):
-    #     pass
-    
-    # def set_inputs(self, inputs, additional_input_layers=None):
-    #     """设置input和inputs属性
-    #     """
-    #     pass
 
     def apply_embeddings(self, inputs):
         raise NotImplementedError
@@ -583,6 +266,7 @@ class LM_Mask(object):
         self.attention_bias = attention_bias.unsqueeze(0).unsqueeze(1)
         return self.attention_bias
 
+
 def extend_with_language_model(InputModel):
     """添加下三角的Attention Mask（语言模型用）
     """
@@ -594,6 +278,7 @@ def extend_with_language_model(InputModel):
             super(LanguageModel, self).__init__(*args, **kwargs)
 
     return LanguageModel
+
 
 class UniLM_Mask(object):
     """定义UniLM的Attention Mask（Seq2Seq模型用）
@@ -609,6 +294,7 @@ class UniLM_Mask(object):
         self.attention_bias = attention_bias.unsqueeze(1).long()
 
         return self.attention_bias
+
 
 def extend_with_unified_language_model(InputModel):
     """添加UniLM的Attention Mask（Seq2Seq模型用）
@@ -635,7 +321,7 @@ class BERT(BERT_BASE):
             with_pool=False,  # 是否包含Pool部分
             with_nsp=False,  # 是否包含NSP部分
             with_mlm=False,  # 是否包含MLM部分
-            custom_position_ids=False,  # 是否自行传入位置id
+            custom_position_ids=False,  # 是否自行传入位置id, True表示传入，False表示不传入，'start_at_padding'表示从padding_idx+1开始
             custom_attention_mask=False, # 是否自行传入attention_mask
             shared_segment_embeddings=False,  # 若True，则segment跟token共用embedding
             layer_norm_cond=None,  # conditional layer_norm
@@ -692,6 +378,8 @@ class BERT(BERT_BASE):
         """BERT的embedding是token、position、segment三者embedding之和
         默认顺序是token_ids, segment_ids(若有), position_ids(若有), custom_attention_mask(若有), conditional_input(若有)
         """
+        assert isinstance(inputs, (tuple, list)), f'Inputs only support list,tuple format but passed {type(inputs)}'
+
         token_ids = inputs[0]
         index_ = 1
         if self.segment_vocab_size > 0:
@@ -700,11 +388,14 @@ class BERT(BERT_BASE):
         else:
             segment_ids = None
 
-        if self.custom_position_ids:  # 暂未使用到，暂保留
+        if self.custom_position_ids is True:  # 自定义position_ids
             position_ids = inputs[index_]
             index_ += 1
+        elif self.custom_position_ids == 'start_at_padding':
+            position_ids = create_position_ids_from_input_ids(token_ids, self.token_pad_ids)
         else:
             position_ids = None
+
         # 根据token_ids创建一个3D的attention mask矩阵，尺寸为[batch_size, 1, 1, to_seq_length]，
         # 目的是为了适配多头注意力机制，从而能广播到[batch_size, num_heads, from_seq_length, to_seq_length]尺寸
         if self.custom_attention_mask:
@@ -755,7 +446,7 @@ class BERT(BERT_BASE):
             additional_embs = None
 
         # 进入embedding层
-        hidden_states = self.embeddings(token_ids, segment_ids, conditional_emb, additional_embs)
+        hidden_states = self.embeddings(token_ids, segment_ids, position_ids, conditional_emb, additional_embs)
         return [hidden_states, attention_mask, conditional_emb] + inputs[index_:]
 
     def apply_main_layers(self, inputs):
@@ -773,7 +464,7 @@ class BERT(BERT_BASE):
         layer_inputs = [hidden_states, attention_mask, conditional_emb, encoder_hidden_state, encoder_attention_mask]
         for l_i, layer_module in enumerate(self.encoderLayer):
             layer_inputs = self.apply_on_layer_begin(l_i, layer_inputs)
-            hidden_states = layer_module(*layer_inputs)
+            hidden_states = grad_checkpoint(layer_module, *layer_inputs) if self.gradient_checkpoint else layer_module(*layer_inputs)
             layer_inputs[0] = hidden_states
             layer_inputs = self.apply_on_layer_end(l_i, layer_inputs)
 
@@ -1139,6 +830,147 @@ class ELECTRA(BERT):
         return mapping
 
 
+class ERNIE(BERT):
+    """百度文心 https://github.com/PaddlePaddle/ERNIE
+    """
+    def __init__(self, *args, **kwargs):
+        super(ERNIE, self).__init__(*args, **kwargs)
+
+    def variable_mapping(self):
+        mapping = super(ERNIE, self).variable_mapping(prefix='ernie')
+        mapping.update({'mlmDecoder.weight': 'ernie.embeddings.word_embeddings.weight',
+                        'mlmDecoder.bias': 'cls.predictions.bias'})
+        for k, v in mapping.items():
+            if ('LayerNorm.weight' in v) or ('LayerNorm.bias' in v):
+                v1 = v.replace('.weight', '.gamma').replace('.bias', '.beta')
+                mapping[k] = v1
+        for del_key in ['nsp.weight', 'nsp.bias']:
+            del mapping[del_key]
+        return mapping
+
+    def load_variable(self, state_dict, name, prefix='ernie'):
+        return super().load_variable(state_dict, name, prefix=prefix)
+
+
+class DebertaV2(BERT):
+    '''DeBERTaV2: https://arxiv.org/abs/2006.03654, https://github.com/microsoft/DeBERTa
+       这里使用的是IEDEA的中文模型：https://huggingface.co/IDEA-CCNL/Erlangshen-DeBERTa-v2-320M-Chinese
+       和transformers包中的区别：
+       1）原始使用的StableDropout替换成了nn.Dropout
+       2）计算attention_score时候用的XSoftmax替换成了F.softmax
+       3）未实现（认为对结果无影响）：Embedding阶段用attention_mask对embedding的padding部分置0
+       4）未实现（认为对结果无影响）：计算attention_score前的attention_mask从[btz, 1, 1, k_len]转为了[btz, 1, q_len, k_len]
+    '''
+    @delete_arguments('with_pool', 'with_nsp')
+    def __init__(self, *args, **kwargs):
+        kwargs.update({'p_bias': 'deberta_v2'})  # 控制在Embedding阶段不生成position_embedding
+        super(DebertaV2, self).__init__(*args, **kwargs)
+        
+        # Encoder中transformer_block前的其他网络结构
+        self.relative_attention = kwargs.get("relative_attention", True)
+        self.conv = ConvLayer(**kwargs) if kwargs.get("conv_kernel_size", 0) > 0 else None
+
+        # 把第二层后的相对位置编码的权重绑定到第一层上，变相实现仅由第一层计算
+        for i in range(1, self.num_hidden_layers):
+            self.encoderLayer[i].multiHeadAttention.relative_positions_encoding.weight = self.encoderLayer[0].multiHeadAttention.relative_positions_encoding.weight
+            self.encoderLayer[i].multiHeadAttention.layernorm.weight = self.encoderLayer[0].multiHeadAttention.layernorm.weight
+            self.encoderLayer[i].multiHeadAttention.layernorm.bias = self.encoderLayer[0].multiHeadAttention.layernorm.bias
+    
+    def apply_main_layers(self, inputs):
+        """DebertaV2：主要区别是第0层后，会通过卷积层
+        """
+        hidden_states, attention_mask, conditional_emb = inputs[:3]
+        if len(inputs[3:]) >= 2:
+            encoder_hidden_state, encoder_attention_mask = inputs[3], inputs[4]
+        else:
+            encoder_hidden_state, encoder_attention_mask = None, None
+
+        encoded_layers = [hidden_states] # 添加embedding的输出
+        layer_inputs = [hidden_states, attention_mask, conditional_emb, encoder_hidden_state, encoder_attention_mask]
+        for l_i, layer_module in enumerate(self.encoderLayer):
+            layer_inputs = self.apply_on_layer_begin(l_i, layer_inputs)
+            hidden_states = grad_checkpoint(layer_module, *layer_inputs) if self.gradient_checkpoint else layer_module(*layer_inputs)
+            # 第0层要经过卷积
+            if l_i == 0 and self.conv is not None:
+                hidden_states = self.conv(encoded_layers[0], hidden_states, attention_mask.squeeze(1).squeeze(1))
+            layer_inputs[0] = hidden_states
+            layer_inputs = self.apply_on_layer_end(l_i, layer_inputs)
+
+            if self.output_all_encoded_layers:
+                encoded_layers.append(hidden_states)
+        if not self.output_all_encoded_layers:
+            encoded_layers.append(hidden_states)
+        return [encoded_layers, conditional_emb]
+
+    def variable_mapping(self):
+        mapping = super(DebertaV2, self).variable_mapping(prefix='deberta')
+        mapping.update({'mlmDecoder.weight': 'deberta.embeddings.word_embeddings.weight',
+                        'mlmDecoder.bias': 'cls.predictions.bias',
+                        'encoderLayer.0.multiHeadAttention.relative_positions_encoding.weight': 'deberta.encoder.rel_embeddings.weight',
+                        'encoderLayer.0.multiHeadAttention.layernorm.weight': 'deberta.encoder.LayerNorm.weight',
+                        'encoderLayer.0.multiHeadAttention.layernorm.bias': 'deberta.encoder.LayerNorm.bias',
+                        'conv.conv.weight': 'deberta.encoder.conv.conv.weight',
+                        'conv.conv.bias': 'deberta.encoder.conv.conv.bias',
+                        'conv.LayerNorm.weight': 'deberta.encoder.conv.LayerNorm.weight',
+                        'conv.LayerNorm.bias': 'deberta.encoder.conv.LayerNorm.bias'})
+        for del_key in ['nsp.weight', 'nsp.bias', 'embeddings.position_embeddings.weight', 'embeddings.segment_embeddings.weight']:
+            del mapping[del_key]
+        return mapping
+
+    def load_variable(self, state_dict, name, prefix='deberta'):
+        return super().load_variable(state_dict, name, prefix=prefix)
+
+
+class UIE(BERT):
+    '''官方项目：https://github.com/universal-ie/UIE
+       参考项目：https://github.com/heiheiyoyo/uie_pytorch
+    '''
+    @delete_arguments('with_nsp', 'with_mlm')
+    def __init__(self, *args, **kwargs):
+        super(UIE, self).__init__(*args, **kwargs)
+        hidden_size = self.hidden_size
+
+        self.linear_start = nn.Linear(hidden_size, 1)
+        self.linear_end = nn.Linear(hidden_size, 1)
+        if kwargs.get('sigmoid', True):
+            self.sigmoid = nn.Sigmoid()
+
+        if kwargs.get('use_task_id') and kwargs.get('use_task_id'):
+            # Add task type embedding to BERT
+            task_type_embeddings = nn.Embedding(kwargs.get('task_type_vocab_size'), self.hidden_size)
+            self.embeddings.task_type_embeddings = task_type_embeddings
+
+            def hook(module, input, output):
+                return output+task_type_embeddings(torch.zeros(input[0].size(), dtype=torch.int64, device=input[0].device))
+            self.embeddings.word_embeddings.register_forward_hook(hook)
+
+    def apply_final_layers(self, inputs):
+        hidden_states = super().apply_final_layers(inputs)  # 仅有hidden_state一项输出
+        sequence_output = hidden_states[0] if isinstance(hidden_states, (tuple, list)) else hidden_states
+
+        start_logits = self.linear_start(sequence_output)
+        start_logits = torch.squeeze(start_logits, -1)
+        start_prob = self.sigmoid(start_logits) if hasattr(self, 'sigmoid') else start_logits
+        end_logits = self.linear_end(sequence_output)
+        end_logits = torch.squeeze(end_logits, -1)
+        end_prob = self.sigmoid(end_logits) if hasattr(self, 'sigmoid') else end_logits
+
+        if isinstance(hidden_states, (tuple, list)):
+            return hidden_states + [start_prob, end_prob]
+        else:
+            return hidden_states, start_prob, end_prob
+
+    def variable_mapping(self):
+        mapping = super(UIE, self).variable_mapping()
+        mapping.update({'linear_start.weight': 'linear_start.weight',
+                        'linear_start.bias': 'linear_start.bias',
+                        'linear_end.weight': 'linear_end.weight',
+                        'linear_end.bias': 'linear_end.bias'})
+        for del_key in ['nsp.weight', 'nsp.bias']:
+            del mapping[del_key]
+        return mapping
+
+
 class Encoder(BERT):
     def __init__(self, *args, **kwargs):
         kwargs['vocab_size'] = kwargs.get('src_vocab_size', kwargs['vocab_size'])
@@ -1161,7 +993,7 @@ class Encoder(BERT):
 
 class Decoder(LM_Mask, BERT):
     @delete_arguments('with_pool', 'with_mlm', 'with_nsp')
-    def __init__(self, *args, with_lm=True, tie_emb_prj_weight=True, logit_scale=True, **kwargs):
+    def __init__(self, *args, with_lm=True, tie_emb_prj_weight=False, logit_scale=True, **kwargs):
         kwargs['vocab_size'] = kwargs.get('tgt_vocab_size', kwargs['vocab_size'])
         kwargs['is_decoder'] = True  # 标记是decoder
         super().__init__(*args, **kwargs)
@@ -1172,7 +1004,9 @@ class Decoder(LM_Mask, BERT):
         # 从hidden_states映射到logit
         if self.with_lm:
             self.final_dense = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
-            if tie_emb_prj_weight:  # decoder底层的embedding和顶层的全连接共享
+            # decoder底层的embedding和顶层的全连接共享
+            # [True]: fudan_bart和uer_t5的t5, [False]: mt5和t5_pegasus
+            if tie_emb_prj_weight:
                 self.final_dense.weight = self.embeddings.word_embeddings.weight
             if logit_scale:  # T5默认会有logit_scale, bart默认没有，所以bart要传入false
                 self.x_logit_scale = (self.hidden_size ** -0.5)
@@ -1188,7 +1022,7 @@ class Decoder(LM_Mask, BERT):
         layer_inputs = [hidden_states, attention_mask, conditional_emb, encoder_hidden_state, encoder_attention_mask]
         for i, layer_module in enumerate(self.decoderLayer):
             layer_inputs = self.apply_on_layer_begin(i, layer_inputs)
-            hidden_states = layer_module(*layer_inputs)
+            hidden_states = grad_checkpoint(layer_module, *layer_inputs) if self.gradient_checkpoint else layer_module(*layer_inputs)
             layer_inputs[0] = hidden_states
             layer_inputs = self.apply_on_layer_end(i, layer_inputs)
 
@@ -1214,21 +1048,8 @@ class Decoder(LM_Mask, BERT):
         mapping = {}
         for k, v in raw_mapping.items():
             mapping[k.replace('encoderLayer', 'decoderLayer')] = v
-        # for i in range(self.num_hidden_layers):
-        #     prefix_i = f'{prefix}.encoder.layer.%d.' % i
-        #     mapping.update({
-        #         f'decoderLayer.{i}.crossAttention.q.weight': prefix_i + 'crossattention.self.query.weight',
-        #         f'decoderLayer.{i}.crossAttention.q.bias': prefix_i + 'crossattention.self.query.bias',
-        #         f'decoderLayer.{i}.crossAttention.k.weight': prefix_i + 'crossattention.self.key.weight',
-        #         f'decoderLayer.{i}.crossAttention.k.bias': prefix_i + 'crossattention.self.key.bias',
-        #         f'decoderLayer.{i}.crossAttention.v.weight': prefix_i + 'crossattention.self.value.weight',
-        #         f'decoderLayer.{i}.crossAttention.v.bias': prefix_i + 'crossattention.self.value.bias',
-        #         f'decoderLayer.{i}.crossAttention.o.weight': prefix_i + 'crossattention.output.dense.weight',
-        #         f'decoderLayer.{i}.crossAttention.o.bias': prefix_i + 'crossattention.output.dense.bias',
-        #         f'decoderLayer.{i}.layerNorm3.weight': prefix_i + 'crossattention.output.LayerNorm.weight',
-        #         f'decoderLayer.{i}.layerNorm3.bias': prefix_i + 'crossattention.output.LayerNorm.bias'
-        #         })
         return mapping
+
 
 class Transformer(BERT_BASE):
     '''encoder-decoder结构
@@ -1275,6 +1096,7 @@ class BART(Transformer):
     '''
     def __init__(self, *args, tie_emb_src_tgt_weight=True, **kwargs):
         kwargs['logit_scale'] = kwargs.get('logit_scale', False)
+        kwargs['tie_emb_prj_weight'] = kwargs.get('tie_emb_prj_weight', True)
         super(BART, self).__init__(*args, tie_emb_src_tgt_weight=tie_emb_src_tgt_weight, **kwargs)
         self.tie_emb_src_tgt_weight = tie_emb_src_tgt_weight
 
@@ -1371,7 +1193,7 @@ class T5_Encoder(Encoder):
         # 把第二层后的相对位置编码的权重绑定到第一层上，变相实现仅由第一层计算
         for i in range(1, self.num_hidden_layers):
             self.encoderLayer[i].multiHeadAttention.relative_positions_encoding.weight = self.encoderLayer[0].multiHeadAttention.relative_positions_encoding.weight
-        self.final_layer_norm = LayerNorm(self.hidden_size, eps=1e-12, conditional_size=self.conditional_size, bias=False, mode='rmsnorm')
+        self.final_layer_norm = LayerNorm(self.hidden_size, eps=1e-12, conditional_size=self.conditional_size, bias=False, norm_mode='rmsnorm')
         self.dropout = nn.Dropout(self.dropout_rate)
 
     def apply_final_layers(self, inputs):
@@ -1393,8 +1215,7 @@ class T5_Encoder(Encoder):
                    f'{prefix}encoderLayer.0.multiHeadAttention.relative_positions_encoding.weight': 'encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight',
                    f'{prefix}final_layer_norm.weight': 'encoder.final_layer_norm.weight'}
         for i in range(self.num_hidden_layers):
-            mapping.update(
-                {
+            mapping.update({
                 f'{prefix}encoderLayer.{i}.multiHeadAttention.q.weight': f'encoder.block.{i}.layer.0.SelfAttention.q.weight',
                 f'{prefix}encoderLayer.{i}.multiHeadAttention.k.weight': f'encoder.block.{i}.layer.0.SelfAttention.k.weight',
                 f'{prefix}encoderLayer.{i}.multiHeadAttention.v.weight': f'encoder.block.{i}.layer.0.SelfAttention.v.weight',
@@ -1428,7 +1249,7 @@ class T5_Decoder(Decoder):
         # 把第二层后的相对位置编码的权重绑定到第一层上，变相实现仅由第一层计算
         for i in range(1, self.num_hidden_layers):
             self.decoderLayer[i].multiHeadAttention.relative_positions_encoding.weight = self.decoderLayer[0].multiHeadAttention.relative_positions_encoding.weight
-        self.final_layer_norm = LayerNorm(self.hidden_size, eps=1e-12, conditional_size=self.conditional_size, bias=False, mode='rmsnorm')
+        self.final_layer_norm = LayerNorm(self.hidden_size, eps=1e-12, conditional_size=self.conditional_size, bias=False, norm_mode='rmsnorm')
         self.dropout = nn.Dropout(self.dropout_rate)
 
     def apply_final_layers(self, inputs):
@@ -1452,8 +1273,7 @@ class T5_Decoder(Decoder):
                    f'{prefix}final_dense.weight': 'lm_head.weight'}
 
         for i in range(self.num_hidden_layers):
-            mapping.update(
-                {
+            mapping.update({
                 f'{prefix}decoderLayer.{i}.multiHeadAttention.q.weight': f'decoder.block.{i}.layer.0.SelfAttention.q.weight',
                 f'{prefix}decoderLayer.{i}.multiHeadAttention.k.weight': f'decoder.block.{i}.layer.0.SelfAttention.k.weight',
                 f'{prefix}decoderLayer.{i}.multiHeadAttention.v.weight': f'decoder.block.{i}.layer.0.SelfAttention.v.weight',
@@ -1746,8 +1566,9 @@ class Transformer_XL(BERT):
     def apply_embeddings(self, inputs):
         '''接受的inputs输入: [token_ids, segment_ids], 暂不支持条件LayerNorm输入
         '''
-        self.mems = self.init_mems(inputs[0].size(0))  # 生成mems
+        assert isinstance(inputs, (tuple, list)), f'Inputs only support list,tuple format but passed {type(inputs)}'
 
+        self.mems = self.init_mems(inputs[0].size(0))  # 生成mems
         # 精简后embeddings中只计算word_emdedding
         word_emb = self.dropout(self.embeddings(inputs[0]))
         index_ = 1
@@ -1771,11 +1592,11 @@ class Transformer_XL(BERT):
             segment_ids = None
 
         if self.attn_type in {'uni', 0}:  # 兼容transformer_xl的设置: 0
-            attention_mask = self.create_mask(word_emb, qlen, klen, mlen)
+            non_tgt_mask = self.create_mask(word_emb, qlen, klen, mlen)
         elif self.attn_type == 'bi':
             attention_mask = (inputs[0] != self.token_pad_ids).long().unsqueeze(1).unsqueeze(2)
-        non_tgt_mask = torch.eye(qlen).to(attention_mask)[None, None, :, :]
-        non_tgt_mask = ((1 - attention_mask - non_tgt_mask) <= 0).long()
+            non_tgt_mask = torch.eye(qlen).to(attention_mask)[None, None, :, :]
+            non_tgt_mask = ((1 - attention_mask - non_tgt_mask) <= 0).long()
 
         return [word_emb, segment_ids, pos_emb, non_tgt_mask, None]
 
@@ -1788,7 +1609,7 @@ class Transformer_XL(BERT):
             mems_i = None if self.mems is None else self.mems[i]
             layer_inputs[-2] = mems_i
             layer_inputs = self.apply_on_layer_begin(i, layer_inputs)
-            hidden_states = layer_module(*layer_inputs)
+            hidden_states = grad_checkpoint(layer_module, *layer_inputs) if self.gradient_checkpoint else layer_module(*layer_inputs)
             layer_inputs[0] = hidden_states
             layer_inputs = self.apply_on_layer_end(i, layer_inputs)
             encoded_layers.append(hidden_states)
@@ -1812,6 +1633,7 @@ class Transformer_XL(BERT):
 
     def variable_mapping(self, prefix=''):
         return {k:k for k, v in self.named_parameters()}
+
 
 class XLNET(Transformer_XL):
     '''构建xlnet模型, 这里做了简化, 只用来finetune, 即没有perm_mask, target_mapping这些输入
@@ -1899,18 +1721,35 @@ class XLNET(Transformer_XL):
                             f'encoderLayer.{i}.layerNorm2.weight': prefix_i + 'ff.layer_norm.weight',
                             f'encoderLayer.{i}.layerNorm2.bias': prefix_i + 'ff.layer_norm.bias'
                             })
-
         return mapping
 
 
-def build_transformer_model(
-        config_path=None,
-        checkpoint_path=None,
-        model='bert',
-        application='encoder',
-        **kwargs
-):
+def build_transformer_model(config_path=None, checkpoint_path=None, model='bert', application='encoder', **kwargs):
     """根据配置文件构建模型，可选加载checkpoint权重
+    config_path=config_path: 模型的config文件地址
+    checkpoint_path=checkpoint_path: 模型文件地址，默认值None表示不加载预训练模型
+    model='bert': 加载的模型结构，这里Model也可以基于nn.Module自定义后传入
+    application='encoder': 模型应用，支持encoder，lm和unilm格式
+    segment_vocab_size=2: type_token_ids数量，默认为2，如不传入segment_ids则需设置为0
+    with_pool=False: 是否包含Pool部分
+    with_nsp=False: 是否包含NSP部分
+    with_mlm=False: 是否包含MLM部分
+    return_model_config=False: 是否返回模型配置参数
+    output_all_encoded_layers=False: 是否返回所有hidden_state层
+    layer_add_embs=nn.Embedding(2, 768): 自定义额外的embedding输入
+    keep_tokens=keep_tokens: 精简词表
+    token_pad_ids=-100: 部分模型padding不是0，在这里指定
+    custom_position_ids=False: 是否自行传入位置id, True表示传入，False表示不传入，'start_at_padding'表示从padding_idx+1开始
+    custom_attention_mask=False: 是否自行传入attention_mask
+    shared_segment_embeddings=False: 若True，则segment跟token共用embedding
+    layer_norm_cond=None: conditional layer_norm
+    dynamic_inherit: 模型动态从torch4keras继承，若build_transformer_model后需直接compile()、fit()需设置为True
+    compound_tokens=None: 扩展Embedding
+    residual_attention_scores=False: Attention矩阵加残差
+    ignore_invalid_weights=False: 允许跳过不存在的权重
+    keep_hidden_layers=None: 保留的hidden_layer层的id
+    hierarchical_position=None: 是否层次分解位置编码
+    gradient_checkpoint=False: 是否使用gradient_checkpoint
     """
     configs = {}
     if config_path is not None:
@@ -1922,6 +1761,7 @@ def build_transformer_model(
         configs['dropout_rate'] = configs.get('hidden_dropout_prob')
     if 'segment_vocab_size' not in configs:
         configs['segment_vocab_size'] = configs.get('type_vocab_size', 2)
+    dynamic_inherit = configs.get('dynamic_inherit', False)
     
     models = {
         'bert': BERT,
@@ -1933,6 +1773,9 @@ def build_transformer_model(
         'roformer_v2': RoFormerV2,
         'gau_alpha': GAU_alpha,
         'electra': ELECTRA,
+        'ernie': ERNIE,
+        'deberta_v2': DebertaV2,
+        'uie': UIE,
         'encoder': Encoder,
         'decoder': Decoder,
         'transformer': Transformer,
@@ -1973,6 +1816,12 @@ def build_transformer_model(
         MODEL = extend_with_language_model(MODEL)
     elif application == 'unilm':
         MODEL = extend_with_unified_language_model(MODEL)
+
+    # 动态继承BaseModel
+    if dynamic_inherit:
+        class MyModel(MODEL, BaseModel): 
+            pass
+        MODEL = MyModel
 
     transformer = MODEL(**configs)
     transformer.build(**configs)

@@ -88,13 +88,14 @@ def get_train_dataloader():
             train_dataloader = DataLoader(MyDataset(cur_load_file), batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
             break
         else:
-            print("No training data! Sleep 300s!")
-            time.sleep(10)
+            sleep_seconds = 300
+            print(f"No training data! Sleep {sleep_seconds}s!")
+            time.sleep(sleep_seconds)
             continue
     return train_dataloader
 train_dataloader = get_train_dataloader()
 
-model = build_transformer_model(config_path, checkpoint_path, segment_vocab_size=0, with_mlm=True).to(device)
+model = build_transformer_model(config_path, checkpoint_path, segment_vocab_size=0, with_mlm=True, dynamic_inherit=True).to(device)
 
 # weight decay
 param_optimizer = list(model.named_parameters())
@@ -115,7 +116,7 @@ class MyLoss(nn.CrossEntropyLoss):
 # 定义使用的loss和optimizer，这里支持自定义
 optimizer = optim.Adam(optimizer_grouped_parameters, lr=learning_rate, weight_decay=weight_decay_rate)
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_train_steps)
-model.compile(loss=MyLoss(ignore_index=0), optimizer=optimizer, scheduler=scheduler)
+model.compile(loss=MyLoss(ignore_index=0), optimizer=optimizer, scheduler=scheduler, grad_accumulation_steps=grad_accum_steps)
 
 
 class ModelCheckpoint(Callback):
@@ -145,7 +146,6 @@ if __name__ == '__main__':
     model.fit(
         train_dataloader,
         steps_per_epoch=steps_per_epoch,
-        grad_accumulation_steps=grad_accum_steps,
         epochs=epochs,
         callbacks=[checkpoint],
     )

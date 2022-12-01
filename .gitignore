@@ -1,8 +1,10 @@
 __pycache__
 datasets/
 *.pt
+*.onnx
 *.csv
 *.json
+*.log
 bert4torch_test.ipynb
 summary/
 .idea
@@ -12,3 +14,6 @@ bert4torch.egg-info/
 build/
 dist/
 .DS_Store
+bert4torch_test.py
+test/
+*.ckpt

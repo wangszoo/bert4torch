@@ -1,15 +1,13 @@
 #! -*- coding: utf-8 -*-
-# 其他代码合
+# 工具函数
 
 import unicodedata
 import six
 import numpy as np
 import re
 import torch
+from packaging import version
 from torch.nn.utils.rnn import pad_sequence
-import time
-import sys
-import collections
 import torch.nn as nn
 from torch.utils.data import Dataset, IterableDataset
 import math
@@ -18,8 +16,7 @@ import inspect
 import json
 import torch.nn.functional as F
 import random
-import warnings
-import os
+from torch4keras.snippets import *
 
 
 is_py2 = six.PY2
@@ -30,7 +27,7 @@ if not is_py2:
 def take_along_dim(input_tensor, indices, dim=None):
     '''兼容部分低版本pytorch没有torch.take_along_dim
     '''
-    if torch.__version__ >= '1.9.0':
+    if version.parse(torch.__version__) >= version.parse('1.9.0'):
         return torch.take_along_dim(input_tensor, indices, dim)
     else:
         # 该逻辑仅在少量数据上测试，如有bug，欢迎反馈
@@ -42,11 +39,22 @@ def take_along_dim(input_tensor, indices, dim=None):
         # assert res.equal(torch.take_along_dim(input_tensor, indices, dim))
         return res
 
+
+def torch_div(input, other, rounding_mode=None):
+    # torch.div兼容老版本
+    if version.parse(torch.__version__) < version.parse('1.7.2'):
+        indices = input // other  # 兼容老版本
+    else:
+        indices = torch.div(input, other, rounding_mode=rounding_mode)  # 行索引
+    return indices
+
+
 def is_string(s):
     """判断是否是字符串
     """
     return isinstance(s, basestring)
     
+
 def truncate_sequences(maxlen, indices, *sequences):
     """截断总长度至不超过maxlen
     """
@@ -61,6 +69,7 @@ def truncate_sequences(maxlen, indices, *sequences):
             sequences[i].pop(indices[i])
         else:
             return sequences
+
 
 def text_segmentate(text, maxlen, seps='\n', strips=None, truncate=True):
     """将文本按照标点符号划分为若干个短句
@@ -87,6 +96,7 @@ def text_segmentate(text, maxlen, seps='\n', strips=None, truncate=True):
     else:
         return [text]
 
+
 def merge_segmentate(sequences, maxlen, sep=''):
     '''把m个句子合并成不超过maxlen的n个句子, 主要用途是合并碎句子
     '''
@@ -106,6 +116,7 @@ def merge_segmentate(sequences, maxlen, sep=''):
     if text:
         sequences_new.append(text)
     return sequences_new
+
 
 def text_augmentation(texts, noise_dict=None, noise_len=0, noise_p=0.0, skip_words=None, strategy='random', allow_dup=True):
     '''简单的EDA策略, 增删改
@@ -189,6 +200,7 @@ def text_augmentation(texts, noise_dict=None, noise_len=0, noise_p=0.0, skip_wor
                 texts[id] = replace(text, sel_idx, noise_dict)
     return texts if len(texts) > 1 else texts[0]
 
+
 def lowercase_and_normalize(text, never_split=()):
     """转小写，并进行简单的标准化
     """
@@ -204,6 +216,7 @@ def lowercase_and_normalize(text, never_split=()):
     text = unicodedata.normalize('NFD', text)
     text = ''.join([ch for ch in text if unicodedata.category(ch) != 'Mn'])
     return text
+
 
 def sequence_padding(inputs, length=None, value=0, seq_dims=1, mode='post'):
     """将序列padding到同一长度
@@ -276,341 +289,13 @@ def delete_arguments(*arguments):
     return actual_decorator
 
 
-class Progbar(object):
-    """Displays a progress bar.
-
-    # Arguments
-        target: Total number of steps expected, None if unknown.
-        width: Progress bar width on screen.
-        verbose: Verbosity mode, 0 (silent), 1 (verbose), 2 (semi-verbose)
-        stateful_metrics: Iterable of string names of metrics that
-            should *not* be averaged over time. Metrics in this list
-            will be displayed as-is. All others will be averaged
-            by the progbar before display.
-        interval: Minimum visual progress update interval (in seconds).
-    """
-
-    def __init__(self, target, width=30, verbose=1, interval=0.05,
-                 stateful_metrics=None):
-        self.target = target
-        self.width = width
-        self.verbose = verbose
-        self.interval = interval
-        if stateful_metrics:
-            self.stateful_metrics = set(stateful_metrics)
-        else:
-            self.stateful_metrics = set()
-
-        self._dynamic_display = ((hasattr(sys.stdout, 'isatty') and
-                                  sys.stdout.isatty()) or
-                                 'ipykernel' in sys.modules)
-        self._total_width = 0
-        self._seen_so_far = 0
-        self._values = collections.OrderedDict()
-        self._start = time.time()
-        self._last_update = 0
-
-    def update(self, current, values=None):
-        """Updates the progress bar.
-
-        # Arguments
-            current: Index of current step.
-            values: List of tuples:
-                `(name, value_for_last_step)`.
-                If `name` is in `stateful_metrics`,
-                `value_for_last_step` will be displayed as-is.
-                Else, an average of the metric over time will be displayed.
-        """
-        values = values or []
-        for k, v in values:
-            if k not in self.stateful_metrics:
-                if k not in self._values:
-                    self._values[k] = [v * (current - self._seen_so_far),
-                                       current - self._seen_so_far]
-                else:
-                    self._values[k][0] += v * (current - self._seen_so_far)
-                    self._values[k][1] += (current - self._seen_so_far)
-            else:
-                # Stateful metrics output a numeric value.  This representation
-                # means "take an average from a single value" but keeps the
-                # numeric formatting.
-                self._values[k] = [v, 1]
-        self._seen_so_far = current
-
-        now = time.time()
-        info = ' - %.0fs' % (now - self._start)
-        if self.verbose == 1:
-            if (now - self._last_update < self.interval and
-                    self.target is not None and current < self.target):
-                return
-
-            prev_total_width = self._total_width
-            if self._dynamic_display:
-                sys.stdout.write('\b' * prev_total_width)
-                sys.stdout.write('\r')
-            else:
-                sys.stdout.write('\n')
-
-            if self.target is not None:
-                numdigits = int(np.floor(np.log10(self.target))) + 1
-                barstr = '%%%dd/%d [' % (numdigits, self.target)
-                bar = barstr % current
-                prog = float(current) / self.target
-                prog_width = int(self.width * prog)
-                if prog_width > 0:
-                    bar += ('=' * (prog_width - 1))
-                    if current < self.target:
-                        bar += '>'
-                    else:
-                        bar += '='
-                bar += ('.' * (self.width - prog_width))
-                bar += ']'
-            else:
-                bar = '%7d/Unknown' % current
-
-            self._total_width = len(bar)
-            sys.stdout.write(bar)
-
-            if current:
-                time_per_unit = (now - self._start) / current
-            else:
-                time_per_unit = 0
-            if self.target is not None and current < self.target:
-                eta = time_per_unit * (self.target - current)
-                if eta > 3600:
-                    eta_format = ('%d:%02d:%02d' %
-                                  (eta // 3600, (eta % 3600) // 60, eta % 60))
-                elif eta > 60:
-                    eta_format = '%d:%02d' % (eta // 60, eta % 60)
-                else:
-                    eta_format = '%ds' % eta
-
-                info = ' - ETA: %s' % eta_format
-            else:
-                if time_per_unit >= 1:
-                    info += ' %.0fs/step' % time_per_unit
-                elif time_per_unit >= 1e-3:
-                    info += ' %.0fms/step' % (time_per_unit * 1e3)
-                else:
-                    info += ' %.0fus/step' % (time_per_unit * 1e6)
-
-            for k in self._values:
-                info += ' - %s:' % k
-                if isinstance(self._values[k], list):
-                    avg = np.mean(
-                        self._values[k][0] / max(1, self._values[k][1]))
-                    if abs(avg) > 1e-3:
-                        info += ' %.4f' % avg
-                    else:
-                        info += ' %.4e' % avg
-                else:
-                    info += ' %s' % self._values[k]
-
-            self._total_width += len(info)
-            if prev_total_width > self._total_width:
-                info += (' ' * (prev_total_width - self._total_width))
-
-            if self.target is not None and current >= self.target:
-                info += '\n'
-
-            sys.stdout.write(info)
-            sys.stdout.flush()
-
-        elif self.verbose == 2:
-            if self.target is None or current >= self.target:
-                for k in self._values:
-                    info += ' - %s:' % k
-                    avg = np.mean(
-                        self._values[k][0] / max(1, self._values[k][1]))
-                    if avg > 1e-3:
-                        info += ' %.4f' % avg
-                    else:
-                        info += ' %.4e' % avg
-                info += '\n'
-
-                sys.stdout.write(info)
-                sys.stdout.flush()
-
-        self._last_update = now
-
-    def add(self, n, values=None):
-        self.update(self._seen_so_far + n, values)
-
-
-class Callback(object):
-    '''Callback基类
-    '''
-    def __init__(self):
-        pass
-    def on_train_begin(self, logs=None):
-        pass
-    def on_train_end(self, logs=None):
-        pass
-    def on_epoch_begin(self, global_step, epoch, logs=None):
-        pass
-    def on_epoch_end(self, global_step, epoch, logs=None):
-        pass
-    def on_batch_begin(self, global_step, batch, logs=None):
-        pass
-    def on_batch_end(self, global_step, batch, logs=None):
-        pass
-    def on_dataloader_end(self, logs=None):
-        pass
-
-
-class ProgbarLogger(Callback):
-    """Callback that prints metrics to stdout.
-
-    # Arguments
-        count_mode: One of "steps" or "samples".
-            Whether the progress bar should
-            count samples seen or steps (batches) seen.
-        stateful_metrics: Iterable of string names of metrics that
-            should *not* be averaged over an epoch.
-            Metrics in this list will be logged as-is.
-            All others will be averaged over time (e.g. loss, etc).
-
-    # Raises
-        ValueError: In case of invalid `count_mode`.
-    """
-
-    def __init__(self, epochs, steps, metrics, stateful_metrics=None, verbose=1):
-        super(ProgbarLogger, self).__init__()
-        if stateful_metrics:
-            self.stateful_metrics = set(stateful_metrics)
-        else:
-            self.stateful_metrics = set()
-        self.params = {'epochs': epochs, 'steps': steps, 'verbose': verbose, 'metrics': metrics}
-        self.verbose = verbose
-        self.epochs = epochs
-
-    def add_metrics(self, metrics, add_position=None):
-        if add_position is None:
-            add_position = len(self.params['metrics'])
-        if isinstance(metrics, str):
-            metrics = [metrics]
-
-        add_metrics = []
-        for metric in metrics:
-            if metric not in self.params['metrics']:
-                add_metrics.append(metric)
-        self.params['metrics'] = self.params['metrics'][:add_position] + add_metrics + self.params['metrics'][add_position:]
-
-    def on_train_begin(self, logs=None):
-        if self.verbose:
-            print('Start Training'.center(40, '='))
-
-    def on_epoch_begin(self, global_step=None, epoch=None, logs=None):
-        if self.verbose:
-            print('Epoch %d/%d' % (epoch + 1, self.epochs))
-            self.target = self.params['steps']
-            self.progbar = Progbar(target=self.target, verbose=self.verbose, stateful_metrics=self.stateful_metrics)
-        self.seen = 0
-
-    def on_batch_begin(self, global_step=None, batch=None, logs=None):
-        if self.seen < self.target:
-            self.log_values = []
-
-    def on_batch_end(self, global_step=None, batch=None, logs=None):
-        logs = logs or {}
-        self.seen += 1
-        for k in self.params['metrics']:
-            if k in logs:
-                self.log_values.append((k, logs[k]))
-
-        # Skip progbar update for the last batch;
-        # will be handled by on_epoch_end.
-        if self.verbose and self.seen < self.target:
-            self.progbar.update(self.seen, self.log_values)
-
-    def on_epoch_end(self, global_step=None, epoch=None, logs=None):
-        logs = logs or {}
-        for k in self.params['metrics']:
-            if k in logs:
-                self.log_values.append((k, logs[k]))
-        if self.verbose:
-            self.progbar.update(self.seen, self.log_values)
-    
-    def on_train_end(self, logs=None):
-        if self.verbose:
-            print('Finish Training'.center(40, '='))
-
-
-class EarlyStopping(Callback):
-    '''Stop training策略, 从keras中移植
-    '''
-    def __init__(self, monitor='loss', min_delta=0, patience=0, verbose=0, mode='auto', baseline=None):
-        super(EarlyStopping, self).__init__()
-
-        self.monitor = monitor
-        self.baseline = baseline
-        self.patience = patience
-        self.verbose = verbose
-        self.min_delta = min_delta
-        self.wait = 0
-        self.stopped_epoch = 0
-
-        if mode not in ['auto', 'min', 'max']:
-            warnings.warn('EarlyStopping mode %s is unknown, fallback to auto mode.' % mode, RuntimeWarning)
-            mode = 'auto'
-
-        if mode == 'min':
-            self.monitor_op = np.less
-        elif mode == 'max':
-            self.monitor_op = np.greater
-        else:
-            self.monitor_op = np.greater if 'acc' in self.monitor else np.less
-        self.min_delta = self.min_delta if self.monitor_op == np.greater else -self.min_delta
-
-    def on_train_begin(self, logs=None):
-        # Allow instances to be re-used
-        self.wait = 0
-        self.stopped_epoch = 0
-        if self.baseline is not None:
-            self.best = self.baseline
-        else:
-            self.best = np.Inf if self.monitor_op == np.less else -np.Inf
-
-    def on_epoch_end(self, steps, epoch, logs=None):
-        current = self.get_monitor_value(logs)
-        if current is None:
-            return
-
-        if self.monitor_op(current - self.min_delta, self.best):
-            self.best = current
-            self.wait = 0
-        else:
-            self.wait += 1
-            if self.wait >= self.patience:
-                self.stopped_epoch = epoch
-
-    def on_train_end(self, logs=None):
-        if self.stopped_epoch > 0 and self.verbose > 0:
-            print(f'Epoch {self.stopped_epoch+1}: early stopping\n')
-
-    def get_monitor_value(self, logs):
-        monitor_value = logs.get(self.monitor)
-        if monitor_value is None:
-            warnings.warn('Early stopping conditioned on metric `%s` '
-                'which is not available. Available metrics are: %s' %
-                (self.monitor, ','.join(list(logs.keys()))), RuntimeWarning)
-        return monitor_value
-
-def metric_mapping(metric, y_pred, y_true):
-    if metric == 'accuracy':
-        if isinstance(y_pred, (list, tuple)):
-            y_pred = y_pred[0]
-        y_pred = torch.argmax(y_pred, dim=-1)
-        acc = torch.sum(y_pred.eq(y_true)).item() / y_true.size(0)
-        return acc
-    return None
-
 def softmax(x, axis=-1):
     """numpy版softmax
     """
     x = x - x.max(axis=axis, keepdims=True)
     x = np.exp(x)
     return x / x.sum(axis=axis, keepdims=True)
+
 
 class AutoRegressiveDecoder(object):
     """通用自回归生成模型解码基类
@@ -636,14 +321,7 @@ class AutoRegressiveDecoder(object):
                   3. 设置温度参数，并做相应处理。
         """
         def actual_decorator(predict):
-            def new_predict(
-                self,
-                inputs,
-                output_ids,
-                states,
-                temperature=1,
-                rtype=default_rtype
-            ):
+            def new_predict(self, inputs, output_ids, states, temperature=1, rtype=default_rtype):
                 assert rtype in ['probas', 'logits']
                 prediction = predict(self, inputs, output_ids, states)
 
@@ -665,18 +343,6 @@ class AutoRegressiveDecoder(object):
             return new_predict
 
         return actual_decorator
-
-    # def last_token(self, model):
-    #     """创建一个只返回最后一个token输出的新Model
-    #     """
-    #     if model not in self.models:
-    #         outputs = [
-    #             keras.layers.Lambda(lambda x: x[:, -1])(output)
-    #             for output in model.outputs
-    #         ]
-    #         self.models[model] = keras.models.Model(model.inputs, outputs)
-
-    #     return self.models[model]
 
     def predict(self, inputs, output_ids, states=None):
         """用户需自定义递归预测函数
@@ -711,7 +377,11 @@ class AutoRegressiveDecoder(object):
                 inputs = [i.repeat([topk]+[1]*(len(i.shape)-1)) for i in inputs]
             scores = output_scores.reshape((-1, 1)) + scores  # 综合累积得分
             indices = scores.flatten().argsort(dim=-1, descending=True)[:topk]  # 仅保留topk
-            indices_1 = torch.div(indices, scores.shape[1], rounding_mode='trunc')  # 行索引
+            indices_1 = torch_div(indices, scores.shape[1], rounding_mode='floor')  # 兼容老版本
+            # if version.parse(torch.__version__) < version.parse('1.7.2'):
+            #     indices_1 = indices // scores.shape[1]  # 兼容老版本
+            # else:
+            #     indices_1 = torch.div(indices, scores.shape[1], rounding_mode='floor')  # 行索引
             indices_2 = (indices % scores.shape[1]).reshape((-1, 1))  # 列索引
             output_ids = torch.cat([output_ids[indices_1], indices_2], 1)  # 更新输出
             output_scores = take_along_dim(scores, indices, dim=None)  # 更新得分
@@ -732,16 +402,7 @@ class AutoRegressiveDecoder(object):
         # 达到长度直接输出
         return output_ids[output_scores.argmax()]
 
-    def random_sample(
-        self,
-        inputs,
-        n,
-        topk=None,
-        topp=None,
-        states=None,
-        temperature=1,
-        min_ends=1
-    ):
+    def random_sample(self, inputs, n, topk=None, topp=None, states=None, temperature=1, min_ends=1):
         """随机采样n个结果
         说明: 非None的topk表示每一步只从概率最高的topk个中采样；而非None的topp
              表示每一步只从概率最高的且概率之和刚好达到topp的若干个token中采样。
@@ -799,6 +460,8 @@ class AutoRegressiveDecoder(object):
 
 
 def search_layer(model, layer_name, retrun_first=True):
+    '''根据layer_name搜索并返回参数/参数list
+    '''
     return_list = []
     for name, param in model.named_parameters():
         if param.requires_grad and layer_name in name:
@@ -812,9 +475,11 @@ def search_layer(model, layer_name, retrun_first=True):
 
 
 class ListDataset(Dataset):
+    '''数据是List格式Dataset，支持传入file_path或者外部已读入的data(List格式)
+    '''
     def __init__(self, file_path=None, data=None, **kwargs):
         self.kwargs = kwargs
-        if isinstance(file_path, (str, list)):
+        if isinstance(file_path, (str, tuple, list)):
             self.data = self.load_data(file_path)
         elif isinstance(data, list):
             self.data = data
@@ -833,11 +498,12 @@ class ListDataset(Dataset):
 
 
 class IterDataset(IterableDataset):
-    '''流式读取文件
+    '''流式读取文件，用于大数据量、多小文件
+       使用时候需要注意steps_per_epoch != None
     '''
     def __init__(self, file_path=None, **kwargs):
         self.kwargs = kwargs
-        if isinstance(file_path, (str, list)):
+        if isinstance(file_path, (str, tuple, list)):
             self.file_path = file_path
         else:
             raise ValueError('The input args shall be str format file_path / list format dataset')
@@ -846,13 +512,23 @@ class IterDataset(IterableDataset):
         return self.load_data(self.file_path)
 
     @staticmethod
-    def load_data(file_path):
-        return file_path
+    def load_data(file_path, verbose=0):
+        if isinstance(file_path, (tuple, list)):
+            for file in file_path:
+                if verbose != 0:
+                    print("Load data: ", file)
+                with open(file, 'r') as file_obj:
+                    for line in file_obj:
+                        yield line
+        elif isinstance(file_path, str):
+            with open(file_path, 'r') as file_obj:
+                for line in file_obj:
+                    yield line
 
 
-# sinusoid编码
 def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=None):
-    '''Returns: [seq_len, d_hid]
+    ''' sinusoid编码
+        Returns: [seq_len, d_hid]
     '''
     position = torch.arange(0, n_position, dtype=torch.float).unsqueeze(1)
     div_term = torch.exp(torch.arange(0, d_hid, 2).float() * (-math.log(10000.0) / d_hid))
@@ -1054,6 +730,74 @@ class VAT():
         return direction
 
 
+class AdversarialTraining(Callback):
+    """对抗训练Callback
+    """
+    def __init__(self, mode, adversarial={}):
+        assert mode in {'', 'fgm', 'pgd', 'vat', 'gradient_penalty'}, 'adversarial_train support fgm, pgd, vat and gradient_penalty mode'
+        self.mode = mode
+        adversarial['epsilon'] = adversarial.get('epsilon', 1.0)
+        adversarial['emb_name'] = adversarial.get('emb_name', 'word_embeddings')
+
+        if mode == 'pgd':
+            adversarial['K'] = adversarial.get('K', 3)  # 步数
+            adversarial['alpha'] = adversarial.get('alpha', 0.3)  # 学习率
+        elif mode == 'vat':
+            adversarial['K'] = adversarial.get('K', 3)
+            adversarial['noise_var'] = adversarial.get('noise_var', 1e-5)  # 噪声的方差
+            adversarial['noise_gamma'] = adversarial.get('noise_gamma', 1e-6) # eps
+            adversarial['adv_step_size'] = adversarial.get('adv_step_size', 1e-3)  # 学习率
+            adversarial['adv_alpha'] = adversarial.get('adv_alpha', 1)  # 对抗loss的权重
+            adversarial['norm_type'] = adversarial.get('norm_type', 'l2')  # 归一化方式
+            adversarial['rank'] = adversarial.get('rank', 0)  # forward返回多个时指定使用的logit
+        self.adversarial = adversarial
+
+    def on_train_begin(self, logs=None):
+        if self.mode in {'gradient_penalty', 'vat'}:
+            self.model.retain_graph = True
+        if self.mode == 'fgm':
+            self.ad_train = FGM(self.model)
+        elif self.mode == 'pgd':
+            self.ad_train = PGD(self.model)
+        elif self.mode == 'vat':
+            self.ad_train = VAT(self.model, **self.adversarial)
+
+    def on_train_step_end(self, logs=None):
+        '''对抗训练
+        '''
+        if self.mode == 'fgm':
+            self.ad_train.attack(**self.adversarial) # embedding被修改了
+            output, self.model.loss, self.model.loss_detail = self.model.train_step(self.model.train_X, self.model.train_y)
+            # self.model.loss.backward() # 反向传播，在正常的grad基础上，累加对抗训练的梯度
+            # 恢复Embedding的参数, 因为要在正常的embedding上更新参数，而不是增加了对抗扰动后的embedding上更新参数~
+            self.ad_train.restore(**self.adversarial)
+        elif self.mode == 'pgd':
+            self.ad_train.backup_grad()  # 备份梯度
+            for t in range(self.adversarial['K']):
+                # 在embedding上添加对抗扰动, first attack时备份param.data
+                self.ad_train.attack(**self.adversarial, is_first_attack=(t==0))
+                if t != self.adversarial['K']-1:
+                    self.model.optimizer.zero_grad()  # 为了累积扰动而不是梯度
+                else:
+                    self.ad_train.restore_grad() # 恢复正常的grad
+                output, self.model.loss, self.model.loss_detail = self.model.train_step(self.model.train_X, self.model.train_y)
+                # self.model.loss.backward() # 反向传播，在正常的grad基础上，累加对抗训练的梯度
+            self.ad_train.restore(**self.adversarial) # 恢复embedding参数
+        # 梯度惩罚
+        elif self.mode == 'gradient_penalty':
+            para = search_layer(self.model, self.adversarial['emb_name'], retrun_first=True)
+            gp = (para.grad ** 2).sum()
+            self.model.loss += 0.5 * gp * self.adversarial['epsilon']
+            self.model.loss.backward()
+        # 虚拟对抗训练
+        elif self.mode == 'vat':
+            logit = self.model.output[self.adversarial['rank']] if isinstance(self.model.output, (tuple, list)) else self.model.output
+            adv_loss = self.ad_train.virtual_adversarial_training(self.model.train_X, logit)
+            self.model.loss_detail.update({'loss_sup': self.model.loss.item(), 'loss_unsup': adv_loss})
+            self.model.loss += (adv_loss if adv_loss else 0)
+            self.model.loss.backward()
+
+
 class WebServing(object):
     """简单的Web接口
     用法：
@@ -1171,19 +915,89 @@ def get_pool_emb(hidden_state=None, pooler=None, attention_mask=None, pool_strat
         raise ValueError('pool_strategy illegal')
 
 
-def seed_everything(seed=None):
-    '''固定seed
-    '''
-    max_seed_value = np.iinfo(np.uint32).max
-    min_seed_value = np.iinfo(np.uint32).min
+def parallel_apply_generator(func, iterable, workers, max_queue_size, dummy=False, random_seeds=True):
+    """多进程或多线程地将func应用到iterable的每个元素中（直接从bert4keras中移植过来）。
+    注意这个apply是异步且无序的，也就是说依次输入a,b,c，但是输出可能是func(c), func(a), func(b)。结果将作为一个
+    generator返回，其中每个item是输入的序号以及该输入对应的处理结果。
+    参数：
+        dummy: False是多进程/线性，True则是多线程/线性；
+        random_seeds: 每个进程的随机种子。
+    """
+    if dummy:
+        from multiprocessing.dummy import Pool, Queue
+    else:
+        from multiprocessing import Pool, Queue
 
-    if (seed is None) or not (min_seed_value <= seed <= max_seed_value):
-        random.randint(np.iinfo(np.uint32).min, np.iinfo(np.uint32).max)
-    print(f"Global seed set to {seed}")
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    return seed
+    in_queue, out_queue, seed_queue = Queue(max_queue_size), Queue(), Queue()
+    if random_seeds is True:
+        random_seeds = [None] * workers
+    elif random_seeds is None or random_seeds is False:
+        random_seeds = []
+    for seed in random_seeds:
+        seed_queue.put(seed)
+
+    def worker_step(in_queue, out_queue):
+        """单步函数包装成循环执行
+        """
+        if not seed_queue.empty():
+            np.random.seed(seed_queue.get())
+        while True:
+            i, d = in_queue.get()
+            r = func(d)
+            out_queue.put((i, r))
+
+    # 启动多进程/线程
+    pool = Pool(workers, worker_step, (in_queue, out_queue))
+
+    # 存入数据，取出结果
+    in_count, out_count = 0, 0
+    for i, d in enumerate(iterable):
+        in_count += 1
+        while True:
+            try:
+                in_queue.put((i, d), block=False)
+                break
+            except six.moves.queue.Full:
+                while out_queue.qsize() > max_queue_size:
+                    yield out_queue.get()
+                    out_count += 1
+        if out_queue.qsize() > 0:
+            yield out_queue.get()
+            out_count += 1
+
+    while out_count != in_count:
+        yield out_queue.get()
+        out_count += 1
+
+    pool.terminate()
+
+
+def parallel_apply(func, iterable, workers, max_queue_size, callback=None, dummy=False, random_seeds=True, unordered=True):
+    """多进程或多线程地将func应用到iterable的每个元素中（直接从bert4keras中移植过来）。
+    注意这个apply是异步且无序的，也就是说依次输入a,b,c，但是输出可能是func(c), func(a), func(b)。
+    参数：
+        callback: 处理单个输出的回调函数；
+        dummy: False是多进程/线性，True则是多线程/线性；windows需设置dummy=True
+        random_seeds: 每个进程的随机种子；
+        unordered: 若为False，则按照输入顺序返回，仅当callback为None时生效。
+    """
+    generator = parallel_apply_generator(func, iterable, workers, max_queue_size, dummy, random_seeds)
+
+    if callback is None:
+        if unordered:
+            return [d for i, d in generator]
+        else:
+            results = sorted(generator, key=lambda d: d[0])
+            return [d for i, d in results]
+    else:
+        for i, d in generator:
+            callback(d)
+
+
+def create_position_ids_from_input_ids(input_ids, padding_idx, past_key_values_length=0):
+    """生成padding_ids, 从padding_idx+1开始。忽略填充符号
+    """
+    # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
+    mask = input_ids.ne(padding_idx).int()
+    incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask) + past_key_values_length) * mask
+    return incremental_indices.long() + padding_idx

@@ -1,12 +1,11 @@
 import torch
-from torch.functional import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
-from bert4torch.snippets import get_sinusoid_encoding_table, take_along_dim
+from bert4torch.snippets import get_sinusoid_encoding_table, take_along_dim, torch_div
 from bert4torch.activations import get_activation
-from typing import List, Optional
+from typing import List, Optional, Union
 import random
 import warnings
 
@@ -63,23 +62,26 @@ class LayerNorm(nn.Module):
 
 
 class MultiHeadAttentionLayer(nn.Module):
-    def __init__(self, hidden_size, num_attention_heads, attention_probs_dropout_prob, attention_scale=True,
+    def __init__(self, hidden_size, num_attention_heads, attention_probs_dropout_prob, dropout_rate=0.1, attention_scale=True,
                  return_attention_scores=False, bias=True, **kwargs):
         super(MultiHeadAttentionLayer, self).__init__()
-
-        assert hidden_size % num_attention_heads == 0
-
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
-        self.attention_head_size = int(hidden_size / num_attention_heads)
+        # assert hidden_size % num_attention_heads == 0  # 旧逻辑，t5_pegasus_small中不可以整除
+        # 兼容t5_pegasus_small
+        if kwargs.get('attention_head_size'):
+            self.attention_head_size = kwargs.get('attention_head_size')
+        else:
+            self.attention_head_size = int(hidden_size / num_attention_heads)
+        self.inner_dim = self.num_attention_heads * self.attention_head_size  # 新逻辑
         self.attention_scale = attention_scale
         self.return_attention_scores = return_attention_scores
 
         self.bias = bias
-        self.q = nn.Linear(hidden_size, hidden_size, bias=bias)
-        self.k = nn.Linear(hidden_size, hidden_size, bias=bias)
-        self.v = nn.Linear(hidden_size, hidden_size, bias=bias)
-        self.o = nn.Linear(hidden_size, hidden_size, bias=bias)
+        self.q = nn.Linear(hidden_size, self.inner_dim, bias=bias)
+        self.k = nn.Linear(hidden_size, self.inner_dim, bias=bias)
+        self.v = nn.Linear(hidden_size, self.inner_dim, bias=bias)
+        self.o = nn.Linear(self.inner_dim, hidden_size, bias=bias)
         self.dropout = nn.Dropout(attention_probs_dropout_prob)
 
         self.a_bias, self.p_bias = kwargs.get('a_bias'), kwargs.get('p_bias')
@@ -98,18 +100,44 @@ class MultiHeadAttentionLayer(nn.Module):
                                                                   is_decoder=kwargs.get('is_decoder'))
             self.relative_positions_encoding = nn.Embedding(kwargs.get('relative_attention_num_buckets'), self.num_attention_heads)
 
+        elif self.p_bias == 'deberta_v2':  # deberta_v2
+            # 配置文件
+            self.share_att_key = kwargs.get("share_att_key", False)
+            self.position_buckets = kwargs.get("position_buckets", -1)
+            self.max_relative_positions = kwargs.get("max_relative_positions", -1)
+            if self.max_relative_positions < 1:
+                self.max_relative_positions = kwargs.get('max_position_embeddings')
+            self.pos_ebd_size = self.max_relative_positions
+            if self.position_buckets > 0:
+                self.pos_ebd_size = self.position_buckets
+
+            # position_embedding
+            self.pos_att_type = kwargs.get('pos_att_type', [])
+            self.relative_positions = RelativePositionsEncodingDebertaV2(qlen=kwargs.get('max_position'), 
+                                                                         klen=kwargs.get('max_position'), 
+                                                                         position_buckets=kwargs.get('position_buckets'),
+                                                                         max_position=kwargs.get('max_position'))
+            self.relative_positions_encoding = nn.Embedding(kwargs.get('max_position'), self.hidden_size)
+            self.norm_rel_ebd = [x.strip() for x in kwargs.get("norm_rel_ebd", "none").lower().split("|")]
+            if "layer_norm" in self.norm_rel_ebd:
+                self.layernorm = nn.LayerNorm(self.hidden_size, kwargs.get('layer_norm_eps', 1e-12), elementwise_affine=True)
+
+            self.pos_dropout = nn.Dropout(dropout_rate)
+
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states, attention_mask=None, encoder_hidden_states=None, encoder_attention_mask=None):
+    def forward(self, hidden_states, attention_mask=None, encoder_hidden_states=None, encoder_attention_mask=None, query_states=None):
         # hidden_states shape: [batch_size, seq_q, hidden_size]
         # attention_mask shape: [batch_size, 1, 1, seq_q] 或者 [batch_size, 1, seq_q, seq_q]
         # encoder_hidden_states shape: [batch_size, seq_k, hidden_size]
         # encoder_attention_mask shape: [batch_size, 1, 1, seq_k]
 
-        mixed_query_layer = self.q(hidden_states)
+        if query_states is None:
+            query_states = hidden_states  # 在deberta_v2中使用
+        mixed_query_layer = self.q(query_states)
         if encoder_hidden_states is not None:
             mixed_key_layer = self.k(encoder_hidden_states)
             mixed_value_layer = self.v(encoder_hidden_states)
@@ -153,12 +181,27 @@ class MultiHeadAttentionLayer(nn.Module):
             attention_scores = attention_scores + key_position_scores_r_t
 
         # 是否进行attention scale
-        if self.attention_scale:
+        if self.p_bias == 'deberta_v2':
+            scale_factor = 1
+            if "c2p" in self.pos_att_type:
+                scale_factor += 1
+            if "p2c" in self.pos_att_type:
+                scale_factor += 1
+            scale = torch.sqrt(torch.tensor(query_layer.size(-1), dtype=torch.float) * scale_factor)
+            attention_scores = attention_scores / scale.to(dtype=query_layer.dtype)
+
+            rel_embeddings = self.pos_dropout(self.layernorm(self.relative_positions_encoding.weight))
+            relations_keys = self.relative_positions(attention_scores.shape[-1], attention_scores.shape[-1])
+            rel_att = self.disentangled_attention_bias(query_layer, key_layer, relations_keys, rel_embeddings, scale_factor)
+            attention_scores = attention_scores + rel_att
+
+        elif self.attention_scale:
             attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # 执行attention mask，对于mask为0部分的attention mask，
         # 值为-1e10，经过softmax后，attention_probs几乎为0，所以不会attention到mask为0的部分
         if attention_mask is not None:
-            # attention_scores = attention_scores.masked_fill(attention_mask == 0, -1e10)
+            # attention_mask = attention_mask * attention_mask.squeeze(-2).unsqueeze(-1)  # deberta_v2中使用，但是不使用也不影响
+            # attention_scores = attention_scores.masked_fill(attention_mask == 0, -1e10)  # 下一行的另一种写法
             attention_mask = (1.0 - attention_mask) * -10000.0  # 所以传入的mask的非padding部分为1, padding部分为0
             attention_scores = attention_scores + attention_mask
 
@@ -184,7 +227,7 @@ class MultiHeadAttentionLayer(nn.Module):
         # 所以在调用view之前，需要contiguous来返回一个contiguous copy；
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
-        new_context_layer_shape = context_layer.size()[:-2] + (self.hidden_size,)
+        new_context_layer_shape = context_layer.size()[:-2] + (self.inner_dim,)
         context_layer = context_layer.view(*new_context_layer_shape)
 
         # 是否返回attention scores
@@ -193,6 +236,57 @@ class MultiHeadAttentionLayer(nn.Module):
             return self.o(context_layer), attention_scores
         else:
             return self.o(context_layer)
+
+    def disentangled_attention_bias(self, query_layer, key_layer, relative_pos, rel_embeddings, scale_factor):
+        '''deberta_v2使用，和原版区别是query_layer是4维
+        '''
+        btz, n_head, q_len, d_head = query_layer.size()
+        k_len = key_layer.size(-2)
+        if relative_pos is None:
+            relative_pos = self.relative_positions(q_len, k_len)
+        if relative_pos.dim() == 2:
+            relative_pos = relative_pos.unsqueeze(0).unsqueeze(0)
+        elif relative_pos.dim() == 3:
+            relative_pos = relative_pos.unsqueeze(1)
+        # bsz x height x query x key
+        elif relative_pos.dim() != 4:
+            raise ValueError(f"Relative position ids must be of dim 2 or 3 or 4. {relative_pos.dim()}")
+
+        att_span = self.pos_ebd_size
+        relative_pos = relative_pos.long().to(query_layer.device)
+
+        rel_embeddings = rel_embeddings[0 : att_span * 2, :].unsqueeze(0)
+        if self.share_att_key:
+            pos_query_layer = self.transpose_for_scores(self.q(rel_embeddings)).repeat(btz, 1, 1, 1)
+            pos_key_layer = self.transpose_for_scores(self.k(rel_embeddings)).repeat(btz, 1, 1, 1)
+        else:
+            # 这里逻辑去掉了
+            pass
+
+        score = 0
+        # content->position
+        if "c2p" in self.pos_att_type:
+            scale = torch.sqrt(torch.tensor(d_head, dtype=torch.float) * scale_factor)
+            c2p_att = torch.matmul(query_layer, pos_key_layer.transpose(-1, -2))
+            c2p_pos = torch.clamp(relative_pos + att_span, 0, att_span * 2 - 1)
+            c2p_att = torch.gather(c2p_att, dim=-1, index=c2p_pos.expand([btz, n_head, q_len, k_len]))
+            score += c2p_att / scale.to(dtype=c2p_att.dtype)
+
+        # position->content
+        if "p2c" in self.pos_att_type:
+            scale = torch.sqrt(torch.tensor(d_head, dtype=torch.float) * scale_factor)
+            if k_len != q_len:
+                r_pos = self.relative_positions(k_len, k_len)
+                r_pos = r_pos.unsqueeze(0)
+            else:
+                r_pos = relative_pos
+
+            p2c_pos = torch.clamp(-r_pos + att_span, 0, att_span * 2 - 1)
+            p2c_att = torch.matmul(key_layer, pos_query_layer.transpose(-1, -2))
+            p2c_att = torch.gather(p2c_att, dim=-1, index=p2c_pos.squeeze(0).expand([btz, n_head, k_len, k_len])).transpose(-1, -2)
+            score += p2c_att / scale.to(dtype=p2c_att.dtype)
+
+        return score
 
 
 class PositionWiseFeedForward(nn.Module):
@@ -297,7 +391,7 @@ class GatedAttentionUnit(nn.Module):
             if method == 'squared_relu':
                 return F.relu(a)**2 / l
             elif method == 'softmax_plus':
-                return F.softmax(a * torch.log(l) / torch.log(torch.tensor(512)).to(mask), dim=dim)
+                return F.softmax(a * torch.log(l) / torch.log(torch.tensor(512.0)).to(mask), dim=dim)
         return a
 
     class OffsetScale(nn.Module):
@@ -319,26 +413,27 @@ class GatedAttentionUnit(nn.Module):
 
 
 class BertEmbeddings(nn.Module):
+    """embeddings层
+       构造word, position and token_type embeddings.
     """
-        embeddings层
-        构造word, position and token_type embeddings.
-    """
-    def __init__(self, vocab_size, embedding_size, hidden_size, max_position, segment_vocab_size, shared_segment_embeddings, drop_rate, conditional_size=False, **kwargs):
+    def __init__(self, vocab_size, embedding_size, hidden_size, max_position, segment_vocab_size, shared_segment_embeddings, dropout_rate, conditional_size=False, token_pad_ids=0, **kwargs):
         super(BertEmbeddings, self).__init__()
         self.shared_segment_embeddings = shared_segment_embeddings
-        self.word_embeddings = nn.Embedding(vocab_size, embedding_size, padding_idx=0)
+        self.word_embeddings = nn.Embedding(vocab_size, embedding_size, padding_idx=token_pad_ids)
 
         # 位置编码
         if kwargs.get('p_bias') == 'sinusoid':
             self.position_embeddings = SinusoidalPositionEncoding(max_position, embedding_size)
-        elif kwargs.get('p_bias') in {'rotary', 'typical_relative', 't5_relative', 'other_relative'}:
+        elif kwargs.get('p_bias') in {'rotary', 'typical_relative', 't5_relative', 'other_relative', 'deberta_v2'}:
             # 如果使用相对位置编码，则不声明PositionEmbeddings
             pass
         elif max_position > 0:
             self.position_embeddings = nn.Embedding(max_position, embedding_size)
         
         # segement编码
-        if (segment_vocab_size > 0) and (not shared_segment_embeddings):
+        if (segment_vocab_size > 0) and (not shared_segment_embeddings) and kwargs.get('use_segment_embedding', True):
+            # use_segment_embedding用于lm, unilm场景，不使用segment_embeddings但是传入segment_ids用于计算mask
+            # 一般无需设置，目前仅在guwenbert中使用
             self.segment_embeddings = nn.Embedding(segment_vocab_size, embedding_size)
 
         # emb_scale
@@ -346,13 +441,13 @@ class BertEmbeddings(nn.Module):
 
         # LayerNorm
         self.layerNorm = LayerNorm(embedding_size, eps=1e-12, conditional_size=conditional_size, **kwargs)
-        self.dropout = nn.Dropout(drop_rate)
+        self.dropout = nn.Dropout(dropout_rate)
 
         # 如果embedding_size != hidden_size，则再有一个linear(适用于albert矩阵分解)
         if embedding_size != hidden_size:
             self.embedding_hidden_mapping_in = nn.Linear(embedding_size, hidden_size)
 
-    def forward(self, token_ids, segment_ids=None, conditional_emb=None, additional_embs=None):
+    def forward(self, token_ids, segment_ids=None, position_ids=None, conditional_emb=None, additional_embs=None, attention_mask=None):
         if (not token_ids.requires_grad) and (token_ids.dtype in {torch.long, torch.int}):
             words_embeddings = self.word_embeddings(token_ids)
         else:
@@ -376,8 +471,9 @@ class BertEmbeddings(nn.Module):
 
         if hasattr(self, 'position_embeddings'):
             seq_length = token_ids.size(1)
-            position_ids = torch.arange(seq_length, dtype=torch.long, device=token_ids.device)
-            position_ids = position_ids.unsqueeze(0).repeat(token_ids.shape[0], 1)
+            if position_ids is None:
+                position_ids = torch.arange(seq_length, dtype=torch.long, device=token_ids.device)
+                position_ids = position_ids.unsqueeze(0).repeat(token_ids.shape[0], 1)
             position_embeddings = self.position_embeddings(position_ids)
             embeddings += position_embeddings
 
@@ -386,6 +482,10 @@ class BertEmbeddings(nn.Module):
 
         if hasattr(self, 'layerNorm'):
             embeddings = self.layerNorm((embeddings, conditional_emb))
+        
+        if attention_mask is not None:
+            embeddings *= attention_mask[:, 0, 0, :, None]
+
         embeddings = self.dropout(embeddings)
 
         if hasattr(self, 'embedding_hidden_mapping_in'):
@@ -405,7 +505,7 @@ class BertLayer(nn.Module):
     def __init__(self, hidden_size, num_attention_heads, dropout_rate, attention_probs_dropout_prob, intermediate_size, hidden_act, 
                  is_dropout=False, conditional_size=False, **kwargs):
         super(BertLayer, self).__init__()
-        self.multiHeadAttention = MultiHeadAttentionLayer(hidden_size, num_attention_heads, attention_probs_dropout_prob, **kwargs)
+        self.multiHeadAttention = MultiHeadAttentionLayer(hidden_size, num_attention_heads, attention_probs_dropout_prob, dropout_rate, **kwargs)
         self.dropout1 = nn.Dropout(dropout_rate)
         self.layerNorm1 = LayerNorm(hidden_size, eps=1e-12, conditional_size=conditional_size, **kwargs)
         self.feedForward = PositionWiseFeedForward(hidden_size, intermediate_size, dropout_rate, hidden_act, is_dropout=is_dropout, **kwargs)
@@ -413,7 +513,7 @@ class BertLayer(nn.Module):
         self.layerNorm2 = LayerNorm(hidden_size, eps=1e-12, conditional_size=conditional_size, **kwargs)
         self.is_decoder = kwargs.get('is_decoder')
         if self.is_decoder:
-            self.crossAttention = MultiHeadAttentionLayer(hidden_size, num_attention_heads, attention_probs_dropout_prob, **kwargs)
+            self.crossAttention = MultiHeadAttentionLayer(hidden_size, num_attention_heads, attention_probs_dropout_prob, dropout_rate, **kwargs)
             self.dropout3 = nn.Dropout(dropout_rate)
             self.layerNorm3 = LayerNorm(hidden_size, eps=1e-12, conditional_size=conditional_size, **kwargs)
 
@@ -716,6 +816,41 @@ class XlnetPositionsEncoding(nn.Module):
         sinusoid_inp = torch.ger(pos_seq, self.inv_freq)
         pos_emb = torch.cat([sinusoid_inp.sin(), sinusoid_inp.cos()], dim=-1)
         return pos_emb
+
+
+class RelativePositionsEncodingDebertaV2(nn.Module):
+    """deberta用的相对位置编码
+    来自论文：https://arxiv.org/abs/2006.03654
+    """
+    def __init__(self, qlen, klen, position_buckets, max_position):
+        super(RelativePositionsEncodingDebertaV2, self).__init__()
+        q_ids = torch.arange(0, qlen)
+        k_ids = torch.arange(0, klen)
+        rel_pos_ids = q_ids[:, None] - k_ids[None, :]
+        if position_buckets > 0 and max_position > 0:
+            rel_pos_ids = self.make_log_bucket_position(rel_pos_ids, position_buckets, max_position)
+        rel_pos_ids = rel_pos_ids.to(torch.long)
+        rel_pos_ids = rel_pos_ids[:qlen, :]
+        rel_pos_ids = rel_pos_ids.unsqueeze(0)
+        self.register_buffer('relative_position', rel_pos_ids)
+
+    @staticmethod
+    def make_log_bucket_position(relative_pos, bucket_size, max_position):
+        sign = torch.sign(relative_pos)
+        mid = bucket_size // 2
+        abs_pos = torch.where((relative_pos < mid) & (relative_pos > -mid),
+            torch.tensor(mid - 1).type_as(relative_pos),
+            torch.abs(relative_pos),
+        )
+        log_pos = (
+            torch.ceil(torch.log(abs_pos / mid) / torch.log(torch.tensor((max_position - 1) / mid)) * (mid - 1)) + mid
+        )
+        bucket_pos = torch.where(abs_pos <= mid, relative_pos.type_as(log_pos), log_pos * sign)
+        return bucket_pos
+
+    def forward(self, qlen, klen):
+        return self.relative_position[:, :qlen, :klen]
+
 
 class RelativePositionsEncoding(nn.Module):
     """nezha用的google相对位置编码
@@ -1073,7 +1208,8 @@ class CRF(nn.Module):
         best_tags = torch.arange(nbest, dtype=torch.long, device=device).view(1, -1).expand(batch_size, -1)
         for idx in range(seq_length - 1, -1, -1):
             best_tags = torch.gather(history_idx[:, idx].view(batch_size, -1), 1, best_tags)
-            best_tags_arr[:, idx] = torch.div(best_tags.data.view(batch_size, -1), nbest, rounding_mode='floor')
+            best_tags_arr[:, idx] = torch_div(best_tags.data.view(batch_size, -1), nbest, rounding_mode='floor')  # 兼容老版本
+            # best_tags_arr[:, idx] = torch.div(best_tags.data.view(batch_size, -1), nbest, rounding_mode='floor')
 
         return torch.where(mask.unsqueeze(-1).bool(), best_tags_arr, oor_tag).permute(2, 0, 1)
 
@@ -1122,7 +1258,6 @@ class GlobalPointer(nn.Module):
         self.head_size = head_size
         self.RoPE = RoPE
         self.tril_mask = tril_mask
-        self.RoPE = RoPE
 
         self.dense = nn.Linear(hidden_size, heads * head_size * 2, bias=use_bias)
         if self.RoPE:
@@ -1169,7 +1304,6 @@ class EfficientGlobalPointer(nn.Module):
         self.head_size = head_size
         self.RoPE = RoPE
         self.tril_mask = tril_mask
-        self.RoPE = RoPE
 
         self.p_dense = nn.Linear(hidden_size, head_size * 2, bias=use_bias)
         self.q_dense = nn.Linear(head_size * 2, heads * 2, bias=use_bias)
@@ -1381,3 +1515,40 @@ class MixUp(nn.Module):
         '''
         y_true1 = y_true[self.perm_index]
         return self.lam * criterion(y_pred, y_true) + (1 - self.lam) * criterion(y_pred, y_true1)
+
+
+class ConvLayer(nn.Module):
+    '''deberta_v2中使用
+    '''
+    def __init__(self, hidden_size, dropout_rate=0.1, layer_norm_eps=1e-12, conv_kernel_size=3, conv_groups=1, conv_act="tanh", **kwargs):
+        super().__init__()
+        kernel_size = conv_kernel_size
+        groups = conv_groups
+        self.conv_act = conv_act
+        self.conv = nn.Conv1d(hidden_size, hidden_size, kernel_size, padding=(kernel_size - 1) // 2, groups=groups)
+        self.LayerNorm = nn.LayerNorm(hidden_size, layer_norm_eps)  # 这里使用bert4torch的LayerNorm会有问题
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, hidden_states, residual_states, input_mask):
+        out = self.conv(hidden_states.permute(0, 2, 1).contiguous()).permute(0, 2, 1).contiguous()
+        rmask = (1 - input_mask).bool()
+        out.masked_fill_(rmask.unsqueeze(-1).expand(out.size()), 0)
+        out = get_activation(self.conv_act)(self.dropout(out))
+
+        layer_norm_input = residual_states + out
+        output = self.LayerNorm(layer_norm_input).to(layer_norm_input)
+
+        if input_mask is None:
+            output_states = output
+        else:
+            if input_mask.dim() != layer_norm_input.dim():
+                if input_mask.dim() == 4:
+                    input_mask = input_mask.squeeze(1).squeeze(1)
+                input_mask = input_mask.unsqueeze(2)
+
+            input_mask = input_mask.to(output.dtype)
+            output_states = output * input_mask
+
+        return output_states
+
+

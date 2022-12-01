@@ -24,7 +24,6 @@ max_t_len = 32
 batch_size = 16
 epochs = 50
 steps_per_epoch = None
-valid_len = 1000
 
 # bert配置
 pretrain_model = 'F:/Projects/pretrain_ckpt/t5/[sushen_t5_pegasus_torch_base]--chinese_t5_pegasus_base/'
@@ -63,7 +62,7 @@ def collate_fn(batch):
         batch_content_ids.append(token_ids)
 
         token_ids, _ = tokenizer.encode(title, maxlen=max_t_len)
-        batch_titile_ids.append([0] + token_ids)
+        batch_titile_ids.append(token_ids)
 
     batch_content_ids = torch.tensor(sequence_padding(batch_content_ids), dtype=torch.long, device=device)
     batch_titile_ids = torch.tensor(sequence_padding(batch_titile_ids), dtype=torch.long, device=device)
@@ -72,15 +71,14 @@ def collate_fn(batch):
 train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 valid_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
+test_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
 
 model = build_transformer_model(
     config_path,
     checkpoint_path,
     model='mt5.1.1',
     segment_vocab_size=0,
-    attention_scale=False,
-    is_dropout=True,
-    tie_emb_prj_weight=False,  # 独立权重
+    dynamic_inherit=True
 ).to(device)
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
@@ -107,7 +105,7 @@ class AutoTitle(AutoRegressiveDecoder):
         output_ids = self.beam_search(encoder_output, topk=topk)  # 基于beam search
         return tokenizer.decode([int(i) for i in output_ids.cpu().numpy()])
 
-autotitle = AutoTitle(start_id=0, end_id=tokenizer._token_end_id, maxlen=max_t_len, device=device)
+autotitle = AutoTitle(start_id=tokenizer._token_start_id, end_id=tokenizer._token_end_id, maxlen=max_t_len, device=device)
 
 class Evaluator(Callback):
     """评估与保存
@@ -119,12 +117,14 @@ class Evaluator(Callback):
 
     def on_epoch_end(self, steps, epoch, logs=None):
         just_show()
-        metrics = self.evaluate(valid_dataset.data[:valid_len])  # 评测模型
+        metrics = self.evaluate(valid_dataset.data)  # 评测模型
+        metrics_test = self.evaluate(test_dataset.data)  # 评测模型
         if metrics['bleu'] > self.best_bleu:
             self.best_bleu = metrics['bleu']
             # model.save_weights('./best_model.pt')  # 保存模型
         metrics['best_bleu'] = self.best_bleu
         print('valid_data:', metrics)
+        print('test_data:', metrics_test)
     
     def evaluate(self, data, topk=1):
         total = 0
@@ -152,7 +152,7 @@ def just_show():
 
 if __name__ == '__main__':
     evaluator = Evaluator()
-    just_show()
+    print(u'生成标题:', autotitle.generate(u'今天天气不错啊'))
     model.fit(
         train_dataloader,
         steps_per_epoch=steps_per_epoch,

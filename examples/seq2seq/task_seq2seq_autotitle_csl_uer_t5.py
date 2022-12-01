@@ -21,7 +21,6 @@ max_t_len = 32
 batch_size = 16
 epochs = 50
 steps_per_epoch = None
-valid_len = 1000
 
 # bert配置
 config_path = 'F:/Projects/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/bert4torch_config.json'
@@ -69,15 +68,15 @@ def collate_fn(batch):
 train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 valid_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
+test_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
 
 model = build_transformer_model(
     config_path,
     checkpoint_path,
     model='t5.1.0',
     segment_vocab_size=0,
-    attention_scale=False,
-    is_dropout=True,
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
+    dynamic_inherit=True
 ).to(device)
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
@@ -115,12 +114,14 @@ class Evaluator(Callback):
 
     def on_epoch_end(self, steps, epoch, logs=None):
         just_show()
-        metrics = self.evaluate(valid_dataset.data[:valid_len])  # 评测模型
+        metrics = self.evaluate(valid_dataset.data)  # 评测模型
+        metrics_test = self.evaluate(test_dataset.data)  # 评测模型
         if metrics['bleu'] > self.best_bleu:
             self.best_bleu = metrics['bleu']
             # model.save_weights('./best_model.pt')  # 保存模型
         metrics['best_bleu'] = self.best_bleu
         print('valid_data:', metrics)
+        print('test_data:', metrics_test)
     
     def evaluate(self, data, topk=1):
         total = 0
@@ -149,7 +150,7 @@ def just_show():
 if __name__ == '__main__':
 
     evaluator = Evaluator()
-
+    print(u'生成标题:', autotitle.generate('中国的首都是extra0京'))
     model.fit(
         train_dataloader,
         steps_per_epoch=steps_per_epoch,

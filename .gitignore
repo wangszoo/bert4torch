@@ -1,9 +1,7 @@
 __pycache__
-datasets/
 *.pt
 *.onnx
 *.csv
-*.json
 *.log
 bert4torch_test.ipynb
 summary/
@@ -17,3 +15,4 @@ dist/
 bert4torch_test.py
 test/
 *.ckpt
+.vscode

@@ -5,9 +5,9 @@ from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BERT
 
 
-config_path = 'F:/Projects/pretrain_ckpt/uie/uie_base_pytorch/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/uie/uie_base_pytorch/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/uie/uie_base_pytorch/vocab.txt'
+config_path = 'E:/pretrain_ckpt/uie/uie_base_pytorch/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/uie/uie_base_pytorch/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/uie/uie_base_pytorch/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 tokenizer = Tokenizer(dict_path, do_lower_case=True)
@@ -53,9 +53,9 @@ class UIE(BERT):
 custom_model = False
 if custom_model:
     # 使用外部自定义的模型
-    uie_model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model=UIE, with_pool=True)
+    uie_model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model=UIE, with_pool=True, add_trainer=True)
     print('Load custom uie model done')
 else:
     # 使用bert4torch自带的uie
-    uie_model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model='uie', with_pool=True, dynamic_inherit=True)
+    uie_model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model='uie', with_pool=True, add_trainer=True)
     print('Load inner uie model done')

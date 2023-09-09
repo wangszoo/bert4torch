@@ -5,7 +5,9 @@ import glob, re
 from tqdm import tqdm
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, AutoRegressiveDecoder, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
+from bert4torch.generation import AutoRegressiveDecoder
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchinfo import summary
@@ -17,9 +19,9 @@ batch_size = 8
 epochs = 10000
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载并精简词表，建立分词器
@@ -84,7 +86,7 @@ def collate_fn(batch):
     return [batch_token_ids, batch_segment_ids], batch_token_ids
 
 # 加载数据集
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/pretrain/金庸小说/*.txt'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/pretrain/金庸小说/*.txt'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
 # 建模
@@ -94,7 +96,7 @@ model = build_transformer_model(
     with_mlm=True,
     application='lm',
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-    dynamic_inherit=True
+    add_trainer=True
 ).to(device)
 summary(model, input_data=[next(iter(train_dataloader))[0]])
 
@@ -123,7 +125,7 @@ class StoryCompletion(AutoRegressiveDecoder):
 
     def generate(self, text, n=1, topp=0.95):
         token_ids, _ = tokenizer.encode(text)
-        results = self.random_sample([token_ids[:-1]], n, topp=topp)  # 基于随机采样
+        results = self.random_sample([token_ids[:-1]], n=n, topp=topp)  # 基于随机采样
         return [text + tokenizer.decode(ids.cpu().numpy()) for ids in results]
 
 story_completion = StoryCompletion(start_id=None, end_id=tokenizer._token_end_id, maxlen=maxlen, device=device)

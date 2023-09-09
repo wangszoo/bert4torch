@@ -4,8 +4,9 @@
 
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, seed_everything
-from bert4torch.snippets import AutoRegressiveDecoder, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, seed_everything, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -23,9 +24,9 @@ epochs = 50
 steps_per_epoch = None
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/bert4torch_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/vocab.txt'
+config_path = 'E:/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/bert4torch_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/t5/[uer_t5_torch_base]--t5-base-chinese-cluecorpussmall/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 seed_everything(42)
 
@@ -65,10 +66,10 @@ def collate_fn(batch):
     batch_titile_ids = torch.tensor(sequence_padding(batch_titile_ids), dtype=torch.long, device=device)
     return [[batch_content_ids], [batch_titile_ids[:, :-1]]], batch_titile_ids[:, 1:].flatten()
 
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
-test_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
+valid_dataset = MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
+test_dataset = MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
 
 model = build_transformer_model(
     config_path,
@@ -76,7 +77,7 @@ model = build_transformer_model(
     model='t5.1.0',
     segment_vocab_size=0,
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-    dynamic_inherit=True
+    add_trainer=True
 ).to(device)
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
@@ -93,13 +94,14 @@ class AutoTitle(AutoRegressiveDecoder):
     """
     @AutoRegressiveDecoder.wraps(default_rtype='logits')
     def predict(self, inputs, output_ids, states):
-        return model.decoder.predict([output_ids] + inputs)[-1][:, -1, :]  # 保留最后一位
+        res = model.decoder.predict([output_ids] + inputs)
+        return res[-1][:, -1, :] if isinstance(res, list) else res[:, -1, :]  # 保留最后一位
 
     def generate(self, text, topk=1):
         token_ids, _ = tokenizer.encode(text, maxlen=max_c_len)
         token_ids = torch.tensor([token_ids], device=device)
         encoder_output = model.encoder.predict([token_ids])
-        output_ids = self.beam_search(encoder_output, topk=topk)  # 基于beam search
+        output_ids = self.beam_search(encoder_output, topk=topk)[0]  # 基于beam search
         return tokenizer.decode(output_ids.cpu().numpy())
 
 autotitle = AutoTitle(start_id=tokenizer._token_start_id, end_id=tokenizer._token_end_id, maxlen=max_t_len, device=device)

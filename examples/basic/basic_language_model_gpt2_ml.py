@@ -6,11 +6,11 @@
 import torch
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer
-from bert4torch.snippets import AutoRegressiveDecoder
+from bert4torch.generation import AutoRegressiveDecoder
 
-config_path = 'F:/Projects/pretrain_ckpt/gpt2/[gpt2-ml_torch_15g]/bert4torch_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/gpt2/[gpt2-ml_torch_15g]/bert4torch_pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/gpt2/[gpt2-ml_torch_15g]/vocab.txt'
+config_path = 'E:/pretrain_ckpt/gpt2/[gpt2-ml_torch_15g]/bert4torch_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/gpt2/[gpt2-ml_torch_15g]/bert4torch_pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/gpt2/[gpt2-ml_torch_15g]/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 tokenizer = Tokenizer(dict_path, token_start=None, token_end=None, do_lower_case=True)  # 建立分词器
@@ -21,7 +21,7 @@ model = build_transformer_model(config_path=config_path, checkpoint_path=checkpo
 class ArticleCompletion(AutoRegressiveDecoder):
     """基于随机采样的文章续写
     """
-    @AutoRegressiveDecoder.wraps(default_rtype='probas')
+    @AutoRegressiveDecoder.wraps(default_rtype='logits')
     def predict(self, inputs, output_ids, states):
         token_ids = torch.cat([inputs[0], output_ids], 1)
         logits = model.predict([token_ids])
@@ -29,7 +29,7 @@ class ArticleCompletion(AutoRegressiveDecoder):
 
     def generate(self, text, n=1, topp=0.95):
         token_ids, _ = tokenizer.encode(text)
-        results = self.random_sample([token_ids], n, topp=topp)  # 基于随机采样
+        results = self.random_sample([token_ids], n=n, topp=topp)  # 基于随机采样
         return [text + tokenizer.decode(ids.cpu().numpy()) for ids in results]
 
 

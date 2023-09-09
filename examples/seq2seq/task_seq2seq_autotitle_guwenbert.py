@@ -5,8 +5,9 @@
 
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, text_segmentate
-from bert4torch.snippets import AutoRegressiveDecoder, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, text_segmentate, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 import torch
 from torchinfo import summary
 import torch.nn as nn
@@ -20,9 +21,9 @@ batch_size = 16
 epochs = 10000
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/robert/[guwen_hf_torch_base]--ethanyt-guwenbert-base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/robert/[guwen_hf_torch_base]--ethanyt-guwenbert-base/bert4torch_pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/robert/[guwen_hf_torch_base]--ethanyt-guwenbert-base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/roberta/[guwen_hf_torch_base]--ethanyt-guwenbert-base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/roberta/[guwen_hf_torch_base]--ethanyt-guwenbert-base/bert4torch_pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/roberta/[guwen_hf_torch_base]--ethanyt-guwenbert-base/vocab.txt'
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 tokenizer = Tokenizer(dict_path, do_lower_case=True)
@@ -45,7 +46,7 @@ def collate_fn(batch):
     batch_segment_ids = torch.tensor(sequence_padding(batch_segment_ids, value=tokenizer._token_pad_id), dtype=torch.long, device=device)
     return [batch_token_ids, batch_segment_ids], [batch_token_ids, batch_segment_ids]
 
-train_dataloader = DataLoader(ListDataset(glob.glob('F:/Projects/data/corpus/sentence_classification/THUCNews/*/*.txt')), 
+train_dataloader = DataLoader(ListDataset(glob.glob('E:/data/corpus/sentence_classification/THUCNews/*/*.txt')), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
 model = build_transformer_model(
@@ -53,8 +54,8 @@ model = build_transformer_model(
     checkpoint_path,
     with_mlm=True,
     application='unilm',
-    dynamic_inherit=True,
-    token_pad_ids=tokenizer._token_pad_id, 
+    add_trainer=True,
+    pad_token_id=tokenizer._token_pad_id, 
     use_segment_embedding=False,
     custom_position_ids='start_at_padding'
 ).to(device)
@@ -95,7 +96,7 @@ class AutoTitle(AutoRegressiveDecoder):
     def generate(self, text, topk=1, topp=0.95):
         max_c_len = maxlen - self.maxlen
         token_ids, segment_ids = tokenizer.encode(text, maxlen=max_c_len)
-        output_ids = self.beam_search([token_ids, segment_ids], topk=topk)  # 基于beam search
+        output_ids = self.beam_search([token_ids, segment_ids], topk=topk)[0]  # 基于beam search
         return tokenizer.decode(output_ids.cpu().numpy())
 
 

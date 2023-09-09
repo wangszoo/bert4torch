@@ -1,22 +1,25 @@
 #! -*- coding: utf-8 -*-
-# 工具函数
+'''工具函数
+'''
 
 import unicodedata
 import six
 import numpy as np
 import re
 import torch
-from packaging import version
 from torch.nn.utils.rnn import pad_sequence
-import torch.nn as nn
-from torch.utils.data import Dataset, IterableDataset
 import math
 import gc
-import inspect
 import json
-import torch.nn.functional as F
 import random
+import importlib
 from torch4keras.snippets import *
+from torch4keras.callbacks import *
+from torch.utils.checkpoint import CheckpointFunction
+if sys.version_info < (3, 8):
+    import importlib_metadata
+else:
+    import importlib.metadata as importlib_metadata
 
 
 is_py2 = six.PY2
@@ -24,40 +27,14 @@ is_py2 = six.PY2
 if not is_py2:
     basestring = str
 
-def take_along_dim(input_tensor, indices, dim=None):
-    '''兼容部分低版本pytorch没有torch.take_along_dim
-    '''
-    if version.parse(torch.__version__) >= version.parse('1.9.0'):
-        return torch.take_along_dim(input_tensor, indices, dim)
-    else:
-        # 该逻辑仅在少量数据上测试，如有bug，欢迎反馈
-        if dim is None:
-            res = input_tensor.flatten()[indices]
-        else:
-            res = np.take_along_axis(input_tensor.cpu().numpy(), indices.cpu().numpy(), axis=dim)
-            res = torch.from_numpy(res).to(input_tensor.device)
-        # assert res.equal(torch.take_along_dim(input_tensor, indices, dim))
-        return res
-
-
-def torch_div(input, other, rounding_mode=None):
-    # torch.div兼容老版本
-    if version.parse(torch.__version__) < version.parse('1.7.2'):
-        indices = input // other  # 兼容老版本
-    else:
-        indices = torch.div(input, other, rounding_mode=rounding_mode)  # 行索引
-    return indices
-
 
 def is_string(s):
-    """判断是否是字符串
-    """
+    """判断是否是字符串"""
     return isinstance(s, basestring)
     
 
 def truncate_sequences(maxlen, indices, *sequences):
-    """截断总长度至不超过maxlen
-    """
+    """截断总长度至不超过maxlen"""
     sequences = [s for s in sequences if s]
     if not isinstance(indices, (list, tuple)):
         indices = [indices] * len(sequences)
@@ -73,7 +50,13 @@ def truncate_sequences(maxlen, indices, *sequences):
 
 def text_segmentate(text, maxlen, seps='\n', strips=None, truncate=True):
     """将文本按照标点符号划分为若干个短句
-       truncate: True表示标点符号切分后仍然超长时, 按照maxlen硬截断分成若干个短句
+       
+       :param text: 待划分的句子
+       :param maxlen: int, 截断长度
+       :param seps: 分隔符
+       :param strips: ''.strip()
+       :param truncate: True表示标点符号切分后仍然超长时, 按照maxlen硬截断分成若干个短句
+       :return: List[str], 划分后的句子列表
     """
     text = text.strip().strip(strips)
     if seps and len(text) > maxlen:
@@ -99,6 +82,10 @@ def text_segmentate(text, maxlen, seps='\n', strips=None, truncate=True):
 
 def merge_segmentate(sequences, maxlen, sep=''):
     '''把m个句子合并成不超过maxlen的n个句子, 主要用途是合并碎句子
+
+    :param sequences: List(str), 短句子列表
+    :param maxlen: int, 最大长度
+    :param sep: str, 合并使用的分隔符, 可以是，。等标点符号
     '''
     sequences_new = []
     text = ''
@@ -120,13 +107,14 @@ def merge_segmentate(sequences, maxlen, sep=''):
 
 def text_augmentation(texts, noise_dict=None, noise_len=0, noise_p=0.0, skip_words=None, strategy='random', allow_dup=True):
     '''简单的EDA策略, 增删改
-    texts: 需要增强的文本/文本list
-    noise_dict: 噪音数据, 元素为str的list, tuple, set
-    noise_len: 噪音长度, 优先试用
-    noise_p: 噪音比例
-    skip_words: 跳过的短语, string/list
-    strategy: 修改的策略, 包含增insert, 删delete, 改replace, 随机random
-    allow_dup: 是否允许同一个位置多次EDA
+    
+    :param texts: 需要增强的文本/文本list
+    :param noise_dict: 噪音数据, 元素为str的list, tuple, set
+    :param noise_len: 噪音长度, 优先试用
+    :param noise_p: 噪音比例
+    :param skip_words: 跳过的短语, string/list
+    :param strategy: 修改的策略, 包含增insert, 删delete, 改replace, 随机random
+    :param allow_dup: 是否允许同一个位置多次EDA
     '''
     def insert(text, insert_idx, noise_dict):
         text = list(text)
@@ -147,8 +135,7 @@ def text_augmentation(texts, noise_dict=None, noise_len=0, noise_p=0.0, skip_wor
         return ''.join(text)
 
     def search(pattern, sequence, keep_last=True):
-        """从sequence中寻找子串pattern, 返回符合pattern的id集合
-        """
+        """从sequence中寻找子串pattern, 返回符合pattern的id集合"""
         n = len(pattern)
         pattern_idx_set = set()
         for i in range(len(sequence)):
@@ -202,8 +189,7 @@ def text_augmentation(texts, noise_dict=None, noise_len=0, noise_p=0.0, skip_wor
 
 
 def lowercase_and_normalize(text, never_split=()):
-    """转小写，并进行简单的标准化
-    """
+    """转小写，并进行简单的标准化"""
     if is_py2:
         text = unicode(text)
     
@@ -219,8 +205,7 @@ def lowercase_and_normalize(text, never_split=()):
 
 
 def sequence_padding(inputs, length=None, value=0, seq_dims=1, mode='post'):
-    """将序列padding到同一长度
-    """
+    """将序列padding到同一长度"""
     if isinstance(inputs[0], (np.ndarray, list)):
         if length is None:
             length = np.max([np.shape(x)[:seq_dims] for x in inputs], axis=0)
@@ -235,19 +220,19 @@ def sequence_padding(inputs, length=None, value=0, seq_dims=1, mode='post'):
         for x in inputs:
             x = x[slices]
             for i in range(seq_dims):
-                if mode == 'post':
+                if mode in {'post', 'right'}:
                     pad_width[i] = (0, length[i] - np.shape(x)[i])
-                elif mode == 'pre':
+                elif mode in {'pre', 'left'}:
                     pad_width[i] = (length[i] - np.shape(x)[i], 0)
                 else:
-                    raise ValueError('"mode" argument must be "post" or "pre".')
+                    raise ValueError('"mode" argument must be "post/right" or "pre/left".')
             x = np.pad(x, pad_width, 'constant', constant_values=value)
             outputs.append(x)
 
         return np.array(outputs)
     
     elif isinstance(inputs[0], torch.Tensor):
-        assert mode == 'post', '"mode" argument must be "post" when element is torch.Tensor'
+        assert mode in {'post', 'right'}, '"mode" argument must be "post/right" when element is torch.Tensor'
         if length is not None:
             inputs = [i[:length] for i in inputs]
         return pad_sequence(inputs, padding_value=value, batch_first=True)
@@ -256,8 +241,7 @@ def sequence_padding(inputs, length=None, value=0, seq_dims=1, mode='post'):
 
 
 def insert_arguments(**arguments):
-    """装饰器，为类方法增加参数（主要用于类的__init__方法）
-    """
+    """装饰器，为类方法增加参数（主要用于类的__init__方法）"""
     def actual_decorator(func):
         def new_func(self, *args, **kwargs):
             for k, v in arguments.items():
@@ -272,8 +256,7 @@ def insert_arguments(**arguments):
 
 
 def delete_arguments(*arguments):
-    """装饰器，为类方法删除参数（主要用于类的__init__方法）
-    """
+    """装饰器，为类方法删除参数（主要用于类的__init__方法）"""
     def actual_decorator(func):
         def new_func(self, *args, **kwargs):
             for k in arguments:
@@ -289,267 +272,8 @@ def delete_arguments(*arguments):
     return actual_decorator
 
 
-def softmax(x, axis=-1):
-    """numpy版softmax
-    """
-    x = x - x.max(axis=axis, keepdims=True)
-    x = np.exp(x)
-    return x / x.sum(axis=axis, keepdims=True)
-
-
-class AutoRegressiveDecoder(object):
-    """通用自回归生成模型解码基类
-    包含beam search和random sample两种策略
-    """
-    def __init__(self, start_id, end_id, maxlen, minlen=1, device='cpu'):
-        self.start_id = start_id
-        self.end_id = end_id
-        self.maxlen = maxlen
-        self.minlen = minlen
-        self.models = {}
-        self.device = device
-        if start_id is None:
-            self.first_output_ids = torch.empty((1, 0), dtype=int, device=device)
-        else:
-            self.first_output_ids = torch.tensor([[self.start_id]], device=device)
-
-    @staticmethod
-    def wraps(default_rtype='probas', use_states=False):
-        """用来进一步完善predict函数
-        目前包含: 1. 设置rtype参数，并做相应处理；
-                  2. 确定states的使用，并做相应处理；
-                  3. 设置温度参数，并做相应处理。
-        """
-        def actual_decorator(predict):
-            def new_predict(self, inputs, output_ids, states, temperature=1, rtype=default_rtype):
-                assert rtype in ['probas', 'logits']
-                prediction = predict(self, inputs, output_ids, states)
-
-                if not use_states:
-                    prediction = (prediction, None)
-
-                if default_rtype == 'logits':
-                    prediction = (nn.Softmax(dim=-1)(prediction[0] / temperature), prediction[1])
-                elif temperature != 1:
-                    probas = torch.power(prediction[0], 1.0 / temperature)
-                    probas = probas / probas.sum(axis=-1, keepdims=True)
-                    prediction = (probas, prediction[1])
-
-                if rtype == 'probas':
-                    return prediction
-                else:
-                    return torch.log(prediction[0] + 1e-12), prediction[1]
-
-            return new_predict
-
-        return actual_decorator
-
-    def predict(self, inputs, output_ids, states=None):
-        """用户需自定义递归预测函数
-        说明: 定义的时候，需要用wraps方法进行装饰，传入default_rtype和use_states，
-             其中default_rtype为字符串logits或probas，probas时返回归一化的概率，
-             rtype=logits时则返回softmax前的结果或者概率对数。
-        返回: 二元组 (得分或概率, states)
-        """
-        raise NotImplementedError
-
-    def beam_search(self, inputs_raw, topk, states=None, temperature=1, min_ends=1, add_btz_dim=True):
-        """beam search解码
-        说明: 这里的topk即beam size；
-        返回: 最优解码序列。
-        """
-        inputs = []
-        for i in inputs_raw:
-            if isinstance(i, torch.torch.Tensor):
-                pass
-            elif isinstance(i, (list, tuple, np.ndarray)) and add_btz_dim:
-                i = torch.tensor([i], device=self.device)
-            elif isinstance(i, (list, tuple, np.ndarray)) and not add_btz_dim:
-                i = torch.tensor(i, device=self.device)
-            else:
-                raise ValueError('Beam search inputs ele only support tensor、array、list、tuple')
-            inputs.append(i)
-
-        output_ids, output_scores = self.first_output_ids, torch.zeros(1, device=self.device)
-        for step in range(self.maxlen):
-            scores, states = self.predict(inputs, output_ids, states, temperature, 'logits')  # 计算当前得分
-            if step == 0:  # 第1步预测后将输入重复topk次
-                inputs = [i.repeat([topk]+[1]*(len(i.shape)-1)) for i in inputs]
-            scores = output_scores.reshape((-1, 1)) + scores  # 综合累积得分
-            indices = scores.flatten().argsort(dim=-1, descending=True)[:topk]  # 仅保留topk
-            indices_1 = torch_div(indices, scores.shape[1], rounding_mode='floor')  # 兼容老版本
-            # if version.parse(torch.__version__) < version.parse('1.7.2'):
-            #     indices_1 = indices // scores.shape[1]  # 兼容老版本
-            # else:
-            #     indices_1 = torch.div(indices, scores.shape[1], rounding_mode='floor')  # 行索引
-            indices_2 = (indices % scores.shape[1]).reshape((-1, 1))  # 列索引
-            output_ids = torch.cat([output_ids[indices_1], indices_2], 1)  # 更新输出
-            output_scores = take_along_dim(scores, indices, dim=None)  # 更新得分
-            is_end = output_ids[:, -1] == self.end_id  # 标记是否以end标记结束
-            end_counts = (output_ids == self.end_id).sum(1)  # 统计出现的end标记
-            if output_ids.shape[1] >= self.minlen:  # 最短长度判断
-                best = output_scores.argmax()  # 得分最大的那个
-                if is_end[best] and end_counts[best] >= min_ends:  # 如果已经终止
-                    return output_ids[best]  # 直接输出
-                else:  # 否则，只保留未完成部分
-                    flag = ~is_end | (end_counts < min_ends)  # 标记未完成序列
-                    if not flag.all():  # 如果有已完成的
-                        inputs = [i[flag] for i in inputs]  # 扔掉已完成序列
-                        output_ids = output_ids[flag]  # 扔掉已完成序列
-                        output_scores = output_scores[flag]  # 扔掉已完成序列
-                        end_counts = end_counts[flag]  # 扔掉已完成end计数
-                        topk = flag.sum()  # topk相应变化
-        # 达到长度直接输出
-        return output_ids[output_scores.argmax()]
-
-    def random_sample(self, inputs, n, topk=None, topp=None, states=None, temperature=1, min_ends=1):
-        """随机采样n个结果
-        说明: 非None的topk表示每一步只从概率最高的topk个中采样；而非None的topp
-             表示每一步只从概率最高的且概率之和刚好达到topp的若干个token中采样。
-        返回: n个解码序列组成的list。
-        """
-        inputs = [torch.tensor([i], device=self.device) for i in inputs]
-        output_ids = self.first_output_ids
-        results = []
-        for step in range(self.maxlen):
-            probas, states = self.predict(inputs, output_ids, states, temperature, 'probas')  # 计算当前概率
-            probas /= probas.sum(dim=-1, keepdims=True)  # 确保归一化
-            if step == 0:  # 第1步预测后将结果重复n次
-                probas = probas.repeat([n]+[1]*(len(probas.shape)-1))
-                inputs = [i.repeat([n]+[1]*(len(i.shape)-1)) for i in inputs]
-                output_ids = output_ids.repeat([n]+[1]*(len(output_ids.shape)-1))
-            if topk is not None:
-                k_indices = probas.argsort(dim=-1, descending=True)[:, :topk]  # 仅保留topk
-                probas = take_along_dim(probas, k_indices, dim=1)  # topk概率
-                probas /= probas.sum(dim=1, keepdims=True)  # 重新归一化
-            if topp is not None:
-                p_indices = probas.argsort(dim=-1, descending=True)  # 从高到低排序
-                probas = take_along_dim(probas, p_indices, dim=-1)  # 排序概率
-                cumsum_probas = torch.cumsum(probas, dim=-1)  # 累积概率
-                flag = torch.roll(cumsum_probas >= topp, 1, dims=1)  # 标记超过topp的部分
-                flag[:, 0] = False  # 结合上面的torch.roll，实现平移一位的效果
-                probas[flag] = 0  # 后面的全部置零
-                probas /= probas.sum(dim=1, keepdims=True)  # 重新归一化
-
-            sample_func = lambda p: torch.multinomial(p, 1)  # 按概率采样函数
-            sample_ids = torch.stack([sample_func(p) for p in probas])
-            sample_ids = sample_ids.reshape((-1, 1))  # 对齐形状
-            if topp is not None:
-                sample_ids = take_along_dim(p_indices, sample_ids, dim=1)  # 对齐原id
-            if topk is not None:
-                sample_ids = take_along_dim(k_indices, sample_ids, dim=1)  # 对齐原id
-            output_ids = torch.cat([output_ids, sample_ids], 1)  # 更新输出
-            is_end = output_ids[:, -1] == self.end_id  # 标记是否以end标记结束
-            end_counts = (output_ids == self.end_id).sum(1)  # 统计出现的end标记
-            if output_ids.shape[1] >= self.minlen:  # 最短长度判断
-                flag = is_end & (end_counts >= min_ends)  # 标记已完成序列
-                if flag.any():  # 如果有已完成的
-                    for ids in output_ids[flag]:  # 存好已完成序列
-                        results.append(ids)
-                    flag = (flag == False)  # 标记未完成序列
-                    inputs = [i[flag] for i in inputs]  # 只保留未完成部分输入
-                    output_ids = output_ids[flag]  # 只保留未完成部分候选集
-                    end_counts = end_counts[flag]  # 只保留未完成部分end计数
-                    if len(output_ids) == 0:
-                        break
-        # 如果还有未完成序列，直接放入结果
-        for ids in output_ids:
-            results.append(ids)
-        # 返回结果
-        return results
-
-
-def search_layer(model, layer_name, retrun_first=True):
-    '''根据layer_name搜索并返回参数/参数list
-    '''
-    return_list = []
-    for name, param in model.named_parameters():
-        if param.requires_grad and layer_name in name:
-            return_list.append(param)
-    if len(return_list) == 0:
-        return None
-    if retrun_first:
-        return return_list[0]
-    else:
-        return return_list
-
-
-class ListDataset(Dataset):
-    '''数据是List格式Dataset，支持传入file_path或者外部已读入的data(List格式)
-    '''
-    def __init__(self, file_path=None, data=None, **kwargs):
-        self.kwargs = kwargs
-        if isinstance(file_path, (str, tuple, list)):
-            self.data = self.load_data(file_path)
-        elif isinstance(data, list):
-            self.data = data
-        else:
-            raise ValueError('The input args shall be str format file_path / list format dataset')
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, index):
-        return self.data[index]
-
-    @staticmethod
-    def load_data(file_path):
-        return file_path
-
-
-class IterDataset(IterableDataset):
-    '''流式读取文件，用于大数据量、多小文件
-       使用时候需要注意steps_per_epoch != None
-    '''
-    def __init__(self, file_path=None, **kwargs):
-        self.kwargs = kwargs
-        if isinstance(file_path, (str, tuple, list)):
-            self.file_path = file_path
-        else:
-            raise ValueError('The input args shall be str format file_path / list format dataset')
-    
-    def __iter__(self):
-        return self.load_data(self.file_path)
-
-    @staticmethod
-    def load_data(file_path, verbose=0):
-        if isinstance(file_path, (tuple, list)):
-            for file in file_path:
-                if verbose != 0:
-                    print("Load data: ", file)
-                with open(file, 'r') as file_obj:
-                    for line in file_obj:
-                        yield line
-        elif isinstance(file_path, str):
-            with open(file_path, 'r') as file_obj:
-                for line in file_obj:
-                    yield line
-
-
-def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=None):
-    ''' sinusoid编码
-        Returns: [seq_len, d_hid]
-    '''
-    position = torch.arange(0, n_position, dtype=torch.float).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, d_hid, 2).float() * (-math.log(10000.0) / d_hid))
-    embeddings_table = torch.zeros(n_position, d_hid)
-    embeddings_table[:, 0::2] = torch.sin(position * div_term)
-    embeddings_table[:, 1::2] = torch.cos(position * div_term)
-    return embeddings_table
-
-    # 第二种实现
-    position_ids = torch.arange(0, n_position).unsqueeze(1)
-    position_ids = position_ids.expand(-1, d_hid)
-    indices = torch.arange(0, d_hid)
-    position_ids = position_ids * torch.pow(10000, -2 * torch.true_divide(torch.floor_divide(indices, 2), d_hid))
-    position_ids[:, ::2] = torch.sin(position_ids[:, ::2])
-    position_ids[:, 1::2] = torch.cos(position_ids[:, 1::2])
-    return position_ids
-
-
 def cal_ts_num(tensor_shape):
-    '''查看某个tensor在gc中的数量
-    '''
+    '''查看某个tensor在gc中的数量'''
     cal_num = 0
     for obj in gc.get_objects():
         try:
@@ -565,255 +289,19 @@ def cal_ts_num(tensor_shape):
     print(cal_num)
 
 
-def get_kw(cls, kwargs):
-    '''保留排除cls的入参后的kwargs
-    '''
-    kwargs_new = {}
-    for k in kwargs:
-        if k not in set(inspect.getargspec(cls)[0]):
-            kwargs_new[k] = kwargs[k]
-    return kwargs_new
-
-
-class FGM():
-    '''对抗训练
-    '''
-    def __init__(self, model):
-        self.model = model
-        self.backup = {}
-
-    def attack(self, epsilon=1., emb_name='word_embeddings', **kwargs):
-        # emb_name这个参数要换成你模型中embedding的参数名
-        # 例如，self.emb = nn.Embedding(5000, 100)
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                self.backup[name] = param.data.clone()
-                norm = torch.norm(param.grad) # 默认为2范数
-                if norm != 0 and not torch.isnan(norm):  # nan是为了apex混合精度时:
-                    r_at = epsilon * param.grad / norm
-                    param.data.add_(r_at)
-
-    def restore(self, emb_name='emb', **kwargs):
-        # emb_name这个参数要换成你模型中embedding的参数名
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name: 
-                assert name in self.backup
-                param.data = self.backup[name]
-        self.backup = {}
-
-
-class PGD():
-    '''对抗训练
-    '''
-    def __init__(self, model):
-        self.model = model
-        self.emb_backup = {}
-        self.grad_backup = {}
-
-    def attack(self, epsilon=1., alpha=0.3, emb_name='word_embeddings', is_first_attack=False, **kwargs):
-        # emb_name这个参数要换成你模型中embedding的参数名
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name:
-                if is_first_attack:
-                    self.emb_backup[name] = param.data.clone()
-                norm = torch.norm(param.grad)
-                if norm != 0 and not torch.isnan(norm):  # nan是为了apex混合精度时
-                    r_at = alpha * param.grad / norm
-                    param.data.add_(r_at)
-                    param.data = self.project(name, param.data, epsilon)
-
-    def restore(self, emb_name='emb', **kwargs):
-        # emb_name这个参数要换成你模型中embedding的参数名
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and emb_name in name: 
-                assert name in self.emb_backup
-                param.data = self.emb_backup[name]
-        self.emb_backup = {}
-        
-    def project(self, param_name, param_data, epsilon):
-        r = param_data - self.emb_backup[param_name]
-        if torch.norm(r) > epsilon:
-            r = epsilon * r / torch.norm(r)
-        return self.emb_backup[param_name] + r
-        
-    def backup_grad(self):
-        for name, param in self.model.named_parameters():
-            # 修复如pooling层参与foward，但是不参与backward过程时grad为空的问题
-            if param.requires_grad and (param.grad is not None):
-                self.grad_backup[name] = param.grad.clone()
-    
-    def restore_grad(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and (param.grad is not None):
-                param.grad = self.grad_backup[name]
-
-
-class VAT():
-    '''虚拟对抗训练 https://github.com/namisan/mt-dnn/blob/v0.2/alum/adv_masked_lm.py
-    '''
-    def __init__(self, model, emb_name='word_embeddings', noise_var=1e-5, noise_gamma=1e-6, adv_step_size=1e-3, 
-                 adv_alpha=1, norm_type='l2', **kwargs):
-        self.model = model
-        self.noise_var = noise_var  # 噪声的方差
-        self.noise_gamma = noise_gamma # eps
-        self.adv_step_size = adv_step_size  # 学习率
-        self.adv_alpha = adv_alpha  # 对抗loss的权重
-        self.norm_type = norm_type  # 归一化方式
-        self.embed = None
-        for (name, module) in self.model.named_modules():
-            if emb_name in name:
-                module.register_forward_hook(hook=self.hook)
-
-    def hook(self, module, fea_in, fea_out):
-        self.embed = fea_out
-        return None
-    
-    def forward_(self, train_X, new_embed):
-        # 把原来的train_X中的token_ids换成embedding形式
-        if isinstance(train_X, (tuple, list)):
-            new_train_X = [new_embed] + train_X[1:]
-            adv_output = self.model.forward(*new_train_X) if self.model.forward.__code__.co_argcount >= 3 else self.model.forward(new_train_X)
-        elif isinstance(train_X, torch.Tensor):
-            adv_output = self.model.forward(new_embed)
-        return adv_output
-
-    def virtual_adversarial_training(self, train_X, logits):
-        # 初始扰动 r
-        noise = self.embed.data.new(self.embed.size()).normal_(0, 1) * self.noise_var
-        noise.requires_grad_()
-        # x + r
-        new_embed = self.embed.data.detach() + noise
-        adv_output = self.forward_(train_X, new_embed)  # forward第一次
-        adv_logits = adv_output[0] if isinstance(adv_output, (list, tuple)) else adv_output
-        adv_loss = self.kl(adv_logits, logits.detach(), reduction="batchmean")
-        delta_grad, = torch.autograd.grad(adv_loss, noise, only_inputs=True)
-        norm = delta_grad.norm()
-        # 梯度消失，退出
-        if torch.isnan(norm) or torch.isinf(norm):
-            return None
-        # inner sum
-        noise = noise + delta_grad * self.adv_step_size
-        # projection
-        noise = self.adv_project(noise, norm_type=self.norm_type, eps=self.noise_gamma)
-        new_embed = self.embed.data.detach() + noise
-        new_embed = new_embed.detach()
-        # 在进行一次训练
-        adv_output = self.forward_(train_X, new_embed)  # forward第二次
-        adv_logits = adv_output[0] if isinstance(adv_output, (list, tuple)) else adv_output
-        adv_loss_f = self.kl(adv_logits, logits.detach())
-        adv_loss_b = self.kl(logits, adv_logits.detach())
-        # 在预训练时设置为10，下游任务设置为1
-        adv_loss = (adv_loss_f + adv_loss_b) * self.adv_alpha
-        return adv_loss
-    
-    @staticmethod
-    def kl(inputs, targets, reduction="sum"):
-        """
-        计算kl散度
-        inputs：tensor，logits
-        targets：tensor，logits
-        """
-        loss = F.kl_div(F.log_softmax(inputs, dim=-1), F.softmax(targets, dim=-1), reduction=reduction)
-        return loss
-
-    @staticmethod
-    def adv_project(grad, norm_type='inf', eps=1e-6):
-        """
-        L0,L1,L2正则，对于扰动计算
-        """
-        if norm_type == 'l2':
-            direction = grad / (torch.norm(grad, dim=-1, keepdim=True) + eps)
-        elif norm_type == 'l1':
-            direction = grad.sign()
-        else:
-            direction = grad / (grad.abs().max(-1, keepdim=True)[0] + eps)
-        return direction
-
-
-class AdversarialTraining(Callback):
-    """对抗训练Callback
-    """
-    def __init__(self, mode, adversarial={}):
-        assert mode in {'', 'fgm', 'pgd', 'vat', 'gradient_penalty'}, 'adversarial_train support fgm, pgd, vat and gradient_penalty mode'
-        self.mode = mode
-        adversarial['epsilon'] = adversarial.get('epsilon', 1.0)
-        adversarial['emb_name'] = adversarial.get('emb_name', 'word_embeddings')
-
-        if mode == 'pgd':
-            adversarial['K'] = adversarial.get('K', 3)  # 步数
-            adversarial['alpha'] = adversarial.get('alpha', 0.3)  # 学习率
-        elif mode == 'vat':
-            adversarial['K'] = adversarial.get('K', 3)
-            adversarial['noise_var'] = adversarial.get('noise_var', 1e-5)  # 噪声的方差
-            adversarial['noise_gamma'] = adversarial.get('noise_gamma', 1e-6) # eps
-            adversarial['adv_step_size'] = adversarial.get('adv_step_size', 1e-3)  # 学习率
-            adversarial['adv_alpha'] = adversarial.get('adv_alpha', 1)  # 对抗loss的权重
-            adversarial['norm_type'] = adversarial.get('norm_type', 'l2')  # 归一化方式
-            adversarial['rank'] = adversarial.get('rank', 0)  # forward返回多个时指定使用的logit
-        self.adversarial = adversarial
-
-    def on_train_begin(self, logs=None):
-        if self.mode in {'gradient_penalty', 'vat'}:
-            self.model.retain_graph = True
-        if self.mode == 'fgm':
-            self.ad_train = FGM(self.model)
-        elif self.mode == 'pgd':
-            self.ad_train = PGD(self.model)
-        elif self.mode == 'vat':
-            self.ad_train = VAT(self.model, **self.adversarial)
-
-    def on_train_step_end(self, logs=None):
-        '''对抗训练
-        '''
-        if self.mode == 'fgm':
-            self.ad_train.attack(**self.adversarial) # embedding被修改了
-            output, self.model.loss, self.model.loss_detail = self.model.train_step(self.model.train_X, self.model.train_y)
-            # self.model.loss.backward() # 反向传播，在正常的grad基础上，累加对抗训练的梯度
-            # 恢复Embedding的参数, 因为要在正常的embedding上更新参数，而不是增加了对抗扰动后的embedding上更新参数~
-            self.ad_train.restore(**self.adversarial)
-        elif self.mode == 'pgd':
-            self.ad_train.backup_grad()  # 备份梯度
-            for t in range(self.adversarial['K']):
-                # 在embedding上添加对抗扰动, first attack时备份param.data
-                self.ad_train.attack(**self.adversarial, is_first_attack=(t==0))
-                if t != self.adversarial['K']-1:
-                    self.model.optimizer.zero_grad()  # 为了累积扰动而不是梯度
-                else:
-                    self.ad_train.restore_grad() # 恢复正常的grad
-                output, self.model.loss, self.model.loss_detail = self.model.train_step(self.model.train_X, self.model.train_y)
-                # self.model.loss.backward() # 反向传播，在正常的grad基础上，累加对抗训练的梯度
-            self.ad_train.restore(**self.adversarial) # 恢复embedding参数
-        # 梯度惩罚
-        elif self.mode == 'gradient_penalty':
-            para = search_layer(self.model, self.adversarial['emb_name'], retrun_first=True)
-            gp = (para.grad ** 2).sum()
-            self.model.loss += 0.5 * gp * self.adversarial['epsilon']
-            self.model.loss.backward()
-        # 虚拟对抗训练
-        elif self.mode == 'vat':
-            logit = self.model.output[self.adversarial['rank']] if isinstance(self.model.output, (tuple, list)) else self.model.output
-            adv_loss = self.ad_train.virtual_adversarial_training(self.model.train_X, logit)
-            self.model.loss_detail.update({'loss_sup': self.model.loss.item(), 'loss_unsup': adv_loss})
-            self.model.loss += (adv_loss if adv_loss else 0)
-            self.model.loss.backward()
-
-
 class WebServing(object):
-    """简单的Web接口
-    用法：
-        arguments = {'text': (None, True), 'n': (int, False)}
-        web = WebServing(port=8864)
-        web.route('/gen_synonyms', gen_synonyms, arguments)
-        web.start()
-        # 然后访问 http://127.0.0.1:8864/gen_synonyms?text=你好
-    说明：
-        基于bottlepy简单封装，仅作为临时测试使用，不保证性能。
-        目前仅保证支持 Tensorflow 1.x + Keras <= 2.3.1。
-        欢迎有经验的开发者帮忙改进。
-    依赖：
-        pip install bottle
-        pip install paste
-        （如果不用 server='paste' 的话，可以不装paste库）
+    """简单的Web接口，基于bottlepy简单封装，仅作为临时测试使用，不保证性能。
+
+    Example:
+        >>> arguments = {'text': (None, True), 'n': (int, False)}
+        >>> web = WebServing(port=8864)
+        >>> web.route('/gen_synonyms', gen_synonyms, arguments)
+        >>> web.start()
+        >>> # 然后访问 http://127.0.0.1:8864/gen_synonyms?text=你好
+    
+    依赖（如果不用 server='paste' 的话，可以不装paste库）:
+        >>> pip install bottle
+        >>> pip install paste
     """
     def __init__(self, host='0.0.0.0', port=8000, server='paste'):
 
@@ -826,13 +314,10 @@ class WebServing(object):
 
     def wraps(self, func, arguments, method='GET'):
         """封装为接口函数
-        参数：
-            func：要转换为接口的函数，需要保证输出可以json化，即需要
-                  保证 json.dumps(func(inputs)) 能被执行成功；
-            arguments：声明func所需参数，其中key为参数名，value[0]为
-                       对应的转换函数（接口获取到的参数值都是字符串
-                       型），value[1]为该参数是否必须；
-            method：GET或者POST。
+
+        :param func: 要转换为接口的函数，需要保证输出可以json化，即需要保证 json.dumps(func(inputs)) 能被执行成功；
+        :param arguments: 声明func所需参数，其中key为参数名，value[0]为对应的转换函数（接口获取到的参数值都是字符串型），value[1]为该参数是否必须；
+        :param method: 'GET'或者'POST'。
         """
         def new_func():
             outputs = {'code': 0, 'desc': u'succeeded', 'data': {}}
@@ -861,19 +346,23 @@ class WebServing(object):
         return new_func
 
     def route(self, path, func, arguments, method='GET'):
-        """添加接口
-        """
+        """添加接口"""
         func = self.wraps(func, arguments, method)
         self.bottle.route(path, method=method)(func)
 
     def start(self):
-        """启动服务
-        """
+        """启动服务"""
         self.bottle.run(host=self.host, port=self.port, server=self.server)
 
 
 def get_pool_emb(hidden_state=None, pooler=None, attention_mask=None, pool_strategy='cls', custom_layer=None):
     ''' 获取句向量
+
+    :param hidden_state: torch.Tensor/List(torch.Tensor)，last_hidden_state/all_encoded_layers
+    :param pooler: torch.Tensor, bert的pool_output输出
+    :param attention_mask: torch.Tensor
+    :param pool_strategy: str, ('cls', 'last-avg', 'mean', 'last-max', 'max', 'first-last-avg', 'custom')
+    :param custom_layer: int/List[int]，指定对某几层做average pooling
     '''
     if pool_strategy == 'pooler':
         return pooler
@@ -919,9 +408,9 @@ def parallel_apply_generator(func, iterable, workers, max_queue_size, dummy=Fals
     """多进程或多线程地将func应用到iterable的每个元素中（直接从bert4keras中移植过来）。
     注意这个apply是异步且无序的，也就是说依次输入a,b,c，但是输出可能是func(c), func(a), func(b)。结果将作为一个
     generator返回，其中每个item是输入的序号以及该输入对应的处理结果。
-    参数：
-        dummy: False是多进程/线性，True则是多线程/线性；
-        random_seeds: 每个进程的随机种子。
+    
+    :param dummy: False是多进程/线性，True则是多线程/线性；
+    :param random_seeds: 每个进程的随机种子。
     """
     if dummy:
         from multiprocessing.dummy import Pool, Queue
@@ -937,8 +426,7 @@ def parallel_apply_generator(func, iterable, workers, max_queue_size, dummy=Fals
         seed_queue.put(seed)
 
     def worker_step(in_queue, out_queue):
-        """单步函数包装成循环执行
-        """
+        """单步函数包装成循环执行"""
         if not seed_queue.empty():
             np.random.seed(seed_queue.get())
         while True:
@@ -975,11 +463,11 @@ def parallel_apply_generator(func, iterable, workers, max_queue_size, dummy=Fals
 def parallel_apply(func, iterable, workers, max_queue_size, callback=None, dummy=False, random_seeds=True, unordered=True):
     """多进程或多线程地将func应用到iterable的每个元素中（直接从bert4keras中移植过来）。
     注意这个apply是异步且无序的，也就是说依次输入a,b,c，但是输出可能是func(c), func(a), func(b)。
-    参数：
-        callback: 处理单个输出的回调函数；
-        dummy: False是多进程/线性，True则是多线程/线性；windows需设置dummy=True
-        random_seeds: 每个进程的随机种子；
-        unordered: 若为False，则按照输入顺序返回，仅当callback为None时生效。
+
+    :param callback: 处理单个输出的回调函数；
+    :param dummy: False是多进程/线性，True则是多线程/线性；windows需设置dummy=True
+    :param random_seeds: 每个进程的随机种子；
+    :param unordered: 若为False，则按照输入顺序返回，仅当callback为None时生效。
     """
     generator = parallel_apply_generator(func, iterable, workers, max_queue_size, dummy, random_seeds)
 
@@ -994,10 +482,97 @@ def parallel_apply(func, iterable, workers, max_queue_size, callback=None, dummy
             callback(d)
 
 
-def create_position_ids_from_input_ids(input_ids, padding_idx, past_key_values_length=0):
-    """生成padding_ids, 从padding_idx+1开始。忽略填充符号
-    """
+def create_position_ids_start_at_padding(input_ids, padding_idx, past_key_values_length=0, start_padding_idx=True):
+    """生成padding_ids, 从padding_idx+1开始。忽略填充符号"""
     # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
     mask = input_ids.ne(padding_idx).int()
-    incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask) + past_key_values_length) * mask
-    return incremental_indices.long() + padding_idx
+    incremental_indices = (torch.cumsum(mask, dim=1).type_as(mask) + past_key_values_length) * mask    
+    return incremental_indices.long() + (padding_idx if start_padding_idx else 0)
+
+
+def set_default_torch_dtype(dtype: torch.dtype, model_name='model') -> torch.dtype:
+    """设置默认权重类型"""
+    if not isinstance(model_name, str):
+        model_name = 'model'
+    mapping = {
+        'float16': torch.float16,
+        'float32': torch.float32,
+        'float64': torch.float64,
+        'bfloat16': torch.bfloat16
+        }
+    if isinstance(dtype, str):
+        dtype = mapping[dtype]
+
+    if not dtype.is_floating_point:
+        raise ValueError(f"Can't instantiate {model_name} under dtype={dtype} since it is not a floating point dtype")
+    log_info(f"Instantiating {model_name} under default dtype {dtype}.")
+    dtype_orig = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    return dtype, dtype_orig
+
+
+def is_accelerate_available(check_partial_state=False):
+    accelerate_available = importlib.util.find_spec("accelerate") is not None
+    if accelerate_available:
+        if check_partial_state:
+            return version.parse(importlib_metadata.version("accelerate")) >= version.parse("0.17.0")
+        else:
+            return True
+    else:
+        return False
+
+
+def load_state_dict_into_meta_model(model, state_dict, device_map=None, torch_dtype=None):
+    """ 把state_dict导入meta_model
+    为了代码简洁，这里device_map需要外部手动指定, 形式如{'embeddings.word_embeddings': 0, 'LayerNormFinal': 0, 'lm_head': 0}
+    """
+
+    from accelerate.utils import set_module_tensor_to_device
+    for param_name, param in state_dict.items():
+        set_module_kwargs = {"value": param}
+        if (device_map is None) or (device_map == 'cpu'):
+            param_device = "cpu"
+        elif device_map == 'auto':
+            param_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        elif device_map in {'gpu', 'cuda'}:
+            param_device = 'cuda'
+        elif isinstance(device_map, torch.device) or isinstance(device_map, int):
+            param_device = device_map
+        elif isinstance(device_map, dict):
+            param_device = device_map[param_name]
+        else:
+            param_device = 'cpu'
+            log_warn(f'Args `device_map`={device_map} has not been pre maintained')
+
+        set_module_kwargs["dtype"] = torch_dtype or param.dtype
+        set_module_tensor_to_device(model, param_name, param_device, **set_module_kwargs)
+
+
+def old_checkpoint(function, model_kwargs):
+    ''' 兼容torch<1.11.0时仅允许输入输出是位置参数
+    通过闭包来对返回参数进行控制
+    '''
+
+    def create_custom_forward(module):
+        def custom_forward(*inputs):
+            outputs = module(*inputs)
+            if isinstance(outputs, dict):
+                setattr(create_custom_forward, 'outputs_keys', [v for v in outputs.keys()])
+                return tuple(outputs.values())
+            else:
+                return outputs
+        return custom_forward
+    
+    args = []
+    __args = inspect.getargspec(type(function).forward)
+    arg_names, arg_defaults = __args[0][1:], __args[-1]
+    for i, arg_name in enumerate(arg_names):
+        args.append(model_kwargs.get(arg_name, arg_defaults[i]))
+
+    preserve = model_kwargs.pop('preserve_rng_state', True)
+
+    outputs = CheckpointFunction.apply(create_custom_forward(function), preserve, *args)
+    if hasattr(create_custom_forward, 'outputs_keys'):
+        return dict(zip(create_custom_forward.outputs_keys, outputs))
+    else:
+        return outputs

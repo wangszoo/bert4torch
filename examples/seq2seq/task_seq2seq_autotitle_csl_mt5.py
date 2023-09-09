@@ -8,8 +8,9 @@
 import json, os
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import SpTokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, seed_everything
-from bert4torch.snippets import AutoRegressiveDecoder, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, seed_everything, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -24,14 +25,14 @@ max_t_len = 32
 batch_size = 16
 epochs = 50
 steps_per_epoch = None
-token_pad_ids = -100
+pad_token_id = -100
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/t5/[google_mt5_torch_base]/bert4torch_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/t5/[google_mt5_torch_base]/pytorch_model.bin'
+config_path = 'E:/pretrain_ckpt/t5/[google_mt5_torch_base]/bert4torch_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/t5/[google_mt5_torch_base]/pytorch_model.bin'
 # 下面两个config是从bert4keras中拿的，项目连接https://github.com/bojone/t5_in_bert4keras
-spm_path = 'F:/Projects/pretrain_ckpt/t5/[google_mt5_bert4keras]/sentencepiece_cn.model'
-keep_tokens_path = 'F:/Projects/pretrain_ckpt/t5/[google_mt5_bert4keras]/sentencepiece_cn_keep_tokens.json'
+spm_path = 'E:/pretrain_ckpt/t5/[google_mt5_bert4keras]/sentencepiece_cn.model'
+keep_tokens_path = 'E:/pretrain_ckpt/t5/[google_mt5_bert4keras]/sentencepiece_cn_keep_tokens.json'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 seed_everything(42)
 
@@ -64,14 +65,14 @@ def collate_fn(batch):
         token_ids, _ = tokenizer.encode(title, maxlen=max_t_len)
         batch_titile_ids.append([0] + token_ids)
 
-    batch_content_ids = torch.tensor(sequence_padding(batch_content_ids, value=token_pad_ids), dtype=torch.long, device=device)
-    batch_titile_ids = torch.tensor(sequence_padding(batch_titile_ids, value=token_pad_ids), dtype=torch.long, device=device)
+    batch_content_ids = torch.tensor(sequence_padding(batch_content_ids, value=pad_token_id), dtype=torch.long, device=device)
+    batch_titile_ids = torch.tensor(sequence_padding(batch_titile_ids, value=pad_token_id), dtype=torch.long, device=device)
     return [[batch_content_ids], [batch_titile_ids[:, :-1]]], batch_titile_ids[:, 1:].flatten()
 
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
-test_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
+valid_dataset = MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
+test_dataset = MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
 
 model = build_transformer_model(
     config_path,
@@ -79,8 +80,8 @@ model = build_transformer_model(
     model='mt5.1.1',
     segment_vocab_size=0,
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-    token_pad_ids=token_pad_ids,  # 也可以指定custom_attention_mask并传入attention_mask来实现
-    dynamic_inherit=True
+    pad_token_id=pad_token_id,  # 也可以指定custom_attention_mask并传入attention_mask来实现
+    add_trainer=True
 ).to(device)
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
@@ -90,7 +91,7 @@ class CrossEntropyLoss(nn.CrossEntropyLoss):
         _, _, y_pred = outputs
         y_pred = y_pred.reshape(-1, y_pred.shape[-1])
         return super().forward(y_pred, y_true)
-model.compile(loss=CrossEntropyLoss(ignore_index=token_pad_ids), optimizer=optim.Adam(model.parameters(), 1e-4))
+model.compile(loss=CrossEntropyLoss(ignore_index=pad_token_id), optimizer=optim.Adam(model.parameters(), 1e-4))
 
 class AutoTitle(AutoRegressiveDecoder):
     """seq2seq解码器
@@ -98,13 +99,14 @@ class AutoTitle(AutoRegressiveDecoder):
     @AutoRegressiveDecoder.wraps(default_rtype='logits')
     def predict(self, inputs, output_ids, states):
         # inputs中包含了[decoder_ids, encoder_hidden_state, encoder_attention_mask]
-        return model.decoder.predict([output_ids] + inputs)[-1][:, -1, :]  # 保留最后一位
+        res = model.decoder.predict([output_ids] + inputs)
+        return res[-1][:, -1, :] if isinstance(res, list) else res[:, -1, :]  # 保留最后一位
 
     def generate(self, text, topk=1):
         token_ids, _ = tokenizer.encode(text, maxlen=max_c_len)
         token_ids = torch.tensor([token_ids], device=device)
         encoder_output = model.encoder.predict([token_ids])
-        output_ids = self.beam_search(encoder_output, topk=topk)  # 基于beam search
+        output_ids = self.beam_search(encoder_output, topk=topk)[0]  # 基于beam search
         return tokenizer.decode([int(i) for i in output_ids.cpu().numpy()])
 
 autotitle = AutoTitle(start_id=0, end_id=tokenizer._token_end_id, maxlen=max_t_len, device=device)

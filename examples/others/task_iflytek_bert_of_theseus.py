@@ -6,7 +6,8 @@
 
 import json
 from bert4torch.models import build_transformer_model, BaseModel, BERT
-from bert4torch.snippets import sequence_padding, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.layers import BertLayer
 import torch
@@ -25,9 +26,9 @@ replacing_rate = 0.5
 steps_for_replacing = 2000
 
 # BERT base
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -63,8 +64,8 @@ def collate_fn(batch):
     return [batch_token_ids, batch_segment_ids], batch_labels.flatten()
 
 # 转换数据集
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/sentence_classification/CLUEdataset/iflytek/train.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/sentence_classification/CLUEdataset/iflytek/dev.json'), batch_size=batch_size, collate_fn=collate_fn) 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/sentence_classification/CLUEdataset/iflytek/train.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
+valid_dataloader = DataLoader(MyDataset('E:/data/corpus/sentence_classification/CLUEdataset/iflytek/dev.json'), batch_size=batch_size, collate_fn=collate_fn) 
 
 class BERT_THESEUS(BERT):
     def __init__(self, **kwargs):
@@ -81,11 +82,12 @@ class BERT_THESEUS(BERT):
             raise Exception('Replace rate must be in the range (0, 1]!')
         self.bernoulli = Bernoulli(torch.tensor([replacing_rate]))
 
-    def apply_main_layers(self, inputs):
+    def apply_main_layers(self, **model_kwargs):
         """BERT的主体是基于Self-Attention的模块
         顺序:Att --> Add --> LN --> FFN --> Add --> LN
+        v0.2.8以后输入输出是以字典形式，这里进行修改
         """
-        hidden_states, attention_mask, conditional_emb = inputs
+        hidden_states, attention_mask, conditional_emb = model_kwargs['hidden_states'], model_kwargs['attention_mask'], model_kwargs['conditional_emb']
         encoded_layers = [hidden_states] # 添加embedding的输出
 
         if self.training:
@@ -102,12 +104,15 @@ class BERT_THESEUS(BERT):
 
         # forward
         for i, layer_module in enumerate(inference_layers):
-            hidden_states = layer_module(hidden_states, attention_mask, conditional_emb)
+            outputs = layer_module(hidden_states, attention_mask, conditional_emb)
+            hidden_states = outputs['hidden_states']
+            model_kwargs.update(outputs)
             if self.output_all_encoded_layers:
                 encoded_layers.append(hidden_states)
         if not self.output_all_encoded_layers:
             encoded_layers.append(hidden_states)
-        return [encoded_layers, conditional_emb]
+        model_kwargs['encoded_layers'] = encoded_layers
+        return model_kwargs
 
 # 定义bert上的模型结构
 class Model(BaseModel):

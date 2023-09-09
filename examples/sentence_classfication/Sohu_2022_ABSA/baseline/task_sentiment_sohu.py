@@ -9,7 +9,9 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, text_segmentate, AdversarialTraining
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, text_segmentate
+from bert4torch.callbacks import AdversarialTraining
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
 from bert4torch.losses import FocalLoss
@@ -30,9 +32,9 @@ fileid = args.fileid
 gpuid = args.gpuid
 
 # 配置设置
-config_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
 data_dir = 'E:/Github/Sohu2022/Sohu2022_data/nlp_data'
 
 choice = 'train'
@@ -160,7 +162,7 @@ class Model(BaseModel):
         self.dropout = [nn.Dropout(0.1), nn.Dropout(0.3), nn.Dropout(0.5), nn.Dropout(0.7)]
         self.dense = nn.Linear(768, 5+1)  # 包含padding
 
-    def forward(self, inputs):
+    def forward(self, *inputs):
         token_ids, entity_ids = inputs[0], inputs[1]
         last_hidden_state = self.bert([token_ids])  # [btz, seq_len, hdsz]
 

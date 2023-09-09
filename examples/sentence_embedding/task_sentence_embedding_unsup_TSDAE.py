@@ -6,7 +6,8 @@
 
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, get_pool_emb
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, get_pool_emb
 import torch.nn as nn
 import torch
 import torch.optim as optim
@@ -46,17 +47,17 @@ else:
 
 # bert配置
 model_dir = {
-    'BERT': 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12',
-    'RoBERTa': 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base',
-    'NEZHA': 'F:/Projects/pretrain_ckpt/nezha/[huawei_noah_torch_base]--nezha-cn-base',
-    'RoFormer': 'F:/Projects/pretrain_ckpt/roformer/[sushen_torch_base]--roformer_v1_base',
-    'SimBERT': 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base',
+    'BERT': 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12',
+    'RoBERTa': 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base',
+    'NEZHA': 'E:/pretrain_ckpt/nezha/[huawei_noah_torch_base]--nezha-cn-base',
+    'RoFormer': 'E:/pretrain_ckpt/roformer/[sushen_torch_base]--roformer_v1_base',
+    'SimBERT': 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base',
 }[model_type]
 
 config_path = f'{model_dir}/bert_config.json' if model_type == 'BERT' else f'{model_dir}/config.json'
 checkpoint_path = f'{model_dir}/pytorch_model.bin'
 dict_path = f'{model_dir}/vocab.txt'
-data_path = 'F:/Projects/data/corpus/sentence_embedding/'
+data_path = 'E:/data/corpus/sentence_embedding/'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # =============================加载数据集=============================
@@ -137,7 +138,7 @@ class Model(BaseModel):
                                                with_pool=with_pool, output_all_encoded_layers=output_all_encoded_layers)
         # 用bert的权重来初始化decoder，crossAttn部分是随机初始化的
         self.decoder = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model=model_name, application='lm', dropout_rate=dropout_rate, 
-                                               output_all_encoded_layers=output_all_encoded_layers, is_decoder=True, segment_vocab_size=0)
+                                               output_all_encoded_layers=output_all_encoded_layers, is_decoder=True, add_cross_attention=True, segment_vocab_size=0)
         self.pool_method = pool_method
 
         # 绑定encoder和decoder的权重
@@ -153,7 +154,7 @@ class Model(BaseModel):
             else:
                 print(enc_k, dec_k)
 
-    def forward(self, token_ids_list):
+    def forward(self, *token_ids_list):
         token_ids1 = token_ids_list[0]
         hidden_state1, pool_cls1 = self.encoder([token_ids1])
         embeddings_a = get_pool_emb(hidden_state1, pool_cls1, token_ids1.gt(0).long(), self.pool_method)

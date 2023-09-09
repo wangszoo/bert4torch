@@ -8,7 +8,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, seed_everything
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, seed_everything
 from bert4torch.optimizers import get_linear_schedule_with_warmup
 from bert4torch.layers import LayerNorm
 from bert4torch.tokenizers import Tokenizer
@@ -45,9 +46,9 @@ conv_dropout = 0.5
 out_dropout = 0.33
 
 # BERT base
-config_path = 'F:/Projects/pretrain_ckpt/bert/[huggingface_torch_base]--bert-base-chinese/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[huggingface_torch_base]--bert-base-chinese/bert4torch_pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[huggingface_torch_base]--bert-base-chinese/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_torch_base]--bert-base-chinese/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_torch_base]--bert-base-chinese/bert4torch_pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_torch_base]--bert-base-chinese/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 固定seed
@@ -175,8 +176,8 @@ def collate_fn(data):
     return [tokens_ids, pieces2word, dist_inputs, sent_length, grid_mask2d], [grid_labels, grid_mask2d, _entity_text]
 
 # 加载数据
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/ner/china-people-daily-ner-corpus/example.train'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/ner/china-people-daily-ner-corpus/example.dev'), batch_size=batch_size, collate_fn=collate_fn) 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/ner/china-people-daily-ner-corpus/example.train'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
+valid_dataloader = DataLoader(MyDataset('E:/data/corpus/ner/china-people-daily-ner-corpus/example.dev'), batch_size=batch_size, collate_fn=collate_fn) 
 
 # 定义bert上的模型结构
 class ConvolutionLayer(nn.Module):
@@ -320,7 +321,7 @@ class Model(BaseModel):
         word_reps, _ = pad_packed_sequence(packed_outs, batch_first=True, total_length=sent_length.max())
 
         # 条件LayerNorm
-        cln = self.cln([word_reps.unsqueeze(2), word_reps])
+        cln = self.cln(word_reps.unsqueeze(2), word_reps)
 
         # concat
         dis_emb = self.dis_embs(dist_inputs)

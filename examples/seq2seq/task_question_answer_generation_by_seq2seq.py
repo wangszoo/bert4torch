@@ -6,8 +6,9 @@
 import json, os
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, text_segmentate
-from bert4torch.snippets import AutoRegressiveDecoder, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, text_segmentate, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder 
+from bert4torch.callbacks import Callback
 from tqdm import tqdm
 import torch
 from torchinfo import summary
@@ -24,18 +25,18 @@ batch_size = 24
 epochs = 100
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def process_data():
-    if os.path.exists('F:/Projects/data/corpus/qa/CIPS-SOGOU/train_data_list_format.json'):
+    if os.path.exists('E:/data/corpus/qa/CIPS-SOGOU/train_data_list_format.json'):
         return
 
     # 标注数据
-    webqa_data = json.load(open('F:/Projects/data/corpus/qa/WebQA.json', encoding='utf-8'))
-    sogou_data = json.load(open('F:/Projects/data/corpus/qa/SogouQA.json', encoding='utf-8'))
+    webqa_data = json.load(open('E:/data/corpus/qa/WebQA.json', encoding='utf-8'))
+    sogou_data = json.load(open('E:/data/corpus/qa/SogouQA.json', encoding='utf-8'))
 
     # 筛选数据
     seps, strips = u'\n。！？!?；;，, ', u'；;，, '
@@ -58,8 +59,8 @@ def process_data():
     # 划分valid
     train_data = [data[j] for i, j in enumerate(random_order) if i % 10 != 0]
     valid_data = [data[j] for i, j in enumerate(random_order) if i % 10 == 0]
-    json.dump(train_data, open('F:/Projects/data/corpus/qa/CIPS-SOGOU/train_data_list_format.json', 'w'), indent=4)
-    json.dump(valid_data, open('F:/Projects/data/corpus/qa/CIPS-SOGOU/valid_data_list_format.json', 'w'), indent=4)
+    json.dump(train_data, open('E:/data/corpus/qa/CIPS-SOGOU/train_data_list_format.json', 'w'), indent=4)
+    json.dump(valid_data, open('E:/data/corpus/qa/CIPS-SOGOU/valid_data_list_format.json', 'w'), indent=4)
 
 process_data()
 
@@ -96,9 +97,9 @@ def collate_fn(batch):
     batch_segment_ids = torch.tensor(sequence_padding(batch_segment_ids), dtype=torch.long, device=device)
     return [batch_token_ids, batch_segment_ids], [batch_token_ids, batch_segment_ids]
 
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/qa/CIPS-SOGOU/train_data_list_format.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/qa/CIPS-SOGOU/train_data_list_format.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/qa/CIPS-SOGOU/valid_data_list_format.json')
+valid_dataset = MyDataset('E:/data/corpus/qa/CIPS-SOGOU/valid_data_list_format.json')
 valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn) 
 
 model = build_transformer_model(
@@ -107,7 +108,7 @@ model = build_transformer_model(
     with_mlm=True,
     application='unilm',
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-    dynamic_inherit=True
+    add_trainer=True
 ).to(device)
 summary(model, input_data=[next(iter(train_dataloader))[0]])
 
@@ -143,10 +144,10 @@ class QuestionAnswerGeneration(AutoRegressiveDecoder):
 
     def generate(self, passage, topk=1, topp=0.95):
         token_ids, segment_ids = tokenizer.encode(passage, maxlen=max_p_len)
-        a_ids = self.random_sample([token_ids, segment_ids], 1, topp=topp)[0]  # 基于随机采样
+        a_ids = self.random_sample([token_ids, segment_ids], n=1, topp=topp)[0]  # 基于随机采样
         token_ids += list(a_ids)
         segment_ids += [1] * len(a_ids)
-        q_ids = self.beam_search([token_ids, segment_ids], topk=topk)  # 基于beam search
+        q_ids = self.beam_search([token_ids, segment_ids], topk=topk)[0]  # 基于beam search
         return (tokenizer.decode(q_ids.cpu().numpy()), tokenizer.decode(a_ids.cpu().numpy()))
 
 

@@ -4,7 +4,8 @@
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.losses import ContrastiveLoss
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, get_pool_emb, seed_everything
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, get_pool_emb, seed_everything
 import torch.nn as nn
 import torch
 import torch.optim as optim
@@ -55,7 +56,7 @@ class Model(BaseModel):
         self.bert = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, with_pool=True, segment_vocab_size=0)
         self.pool_method = pool_method
 
-    def forward(self, token_ids_list):
+    def forward(self, *token_ids_list):
         reps = []
         for token_ids in token_ids_list:
             hidden_state1, pool_cls1 = self.bert([token_ids])

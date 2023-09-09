@@ -11,8 +11,9 @@ from bert4torch.tokenizers import Tokenizer, load_vocab
 from torch import nn, optim
 import torch
 from torch.utils.data import DataLoader
-from bert4torch.snippets import sequence_padding, Callback, ListDataset
-from bert4torch.snippets import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder
 from sympy import Integer
 import warnings
 warnings.filterwarnings("ignore")
@@ -23,9 +24,9 @@ batch_size = 16
 epochs = 100
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载并精简词表，建立分词器
@@ -110,10 +111,10 @@ def collate_fn(batch):
     return [batch_token_ids, batch_segment_ids], [batch_token_ids, batch_segment_ids]
 
 # 加载数据集
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/ape210k/train.ape.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-valid_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/ape210k/valid.ape.json')
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/seq2seq/ape210k/train.ape.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+valid_dataset = MyDataset('E:/data/corpus/seq2seq/ape210k/valid.ape.json')
 # valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-# test_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/ape210k/test.ape.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+# test_dataloader = DataLoader(MyDataset('E:/data/corpus/seq2seq/ape210k/test.ape.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
 
 model = build_transformer_model(
@@ -122,7 +123,7 @@ model = build_transformer_model(
     with_mlm=True,
     application='unilm',
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-    dynamic_inherit=True
+    add_trainer=True
 ).to(device)
 
 
@@ -160,7 +161,7 @@ class AutoSolve(AutoRegressiveDecoder):
 
     def generate(self, text, topk=1):
         token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)
-        output_ids = self.beam_search([token_ids, segment_ids], topk=topk)  # 基于beam search
+        output_ids = self.beam_search([token_ids, segment_ids], topk=topk)[0]  # 基于beam search
         return tokenizer.decode(output_ids.cpu().numpy()).replace(' ', '')
 
 
@@ -186,7 +187,7 @@ class Evaluator(Callback):
         total, right = 0.0, 0.0
         for question, equation, answer in tqdm(data, desc='Evaluate'):
             total += 1
-            pred_equation = autosolve.generate(question, topk)
+            pred_equation = autosolve.generate(question=n, topk=topk)
             try:
                 right += int(is_equal(eval(pred_equation), eval(answer)))
             except:

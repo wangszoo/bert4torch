@@ -1,7 +1,8 @@
 import torch
 from torch.utils.data import DataLoader
 from model import uie_model, tokenizer, custom_model
-from bert4torch.snippets import seed_everything, sequence_padding, Callback
+from bert4torch.snippets import seed_everything, sequence_padding
+from bert4torch.callbacks import Callback
 from torch import nn
 from torch.utils.data import Dataset
 import json
@@ -162,7 +163,10 @@ valid_dataloader = DataLoader(dev_ds, batch_size=batch_size, collate_fn=collate_
 
 class MyLoss(nn.Module):
     def forward(self, y_pred, y_true):
-        start_prob, end_prob = y_pred
+        if custom_model:
+            start_prob, end_prob = y_pred
+        else:
+            start_prob, end_prob = y_pred[-2:]
         start_ids, end_ids = y_true
         loss_start = torch.nn.functional.binary_cross_entropy(start_prob, start_ids)
         loss_end = torch.nn.functional.binary_cross_entropy(end_prob, end_ids)

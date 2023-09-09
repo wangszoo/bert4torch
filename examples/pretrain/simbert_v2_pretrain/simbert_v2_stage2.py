@@ -9,8 +9,9 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, ListDataset, text_segmentate, get_pool_emb
-from bert4torch.snippets import AutoRegressiveDecoder, Callback, truncate_sequences
+from bert4torch.snippets import sequence_padding, ListDataset, text_segmentate, get_pool_emb, truncate_sequences
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 from bert4torch.tokenizers import Tokenizer
 import jieba
 jieba.initialize()
@@ -20,9 +21,9 @@ maxlen = 64
 batch_size = 12
 
 # bert配置，需要加载stage1训练后的权重，这里直接加载官方最终的权重以示例
-config_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 建立分词器
@@ -75,15 +76,15 @@ def masked_encode(text):
 
 # ========== 蒸馏用：开始 ==========
 # simbert配置
-sim_config_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/config.json'
-sim_checkpoint_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/pytorch_model.bin'
-sim_dict_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/vocab.txt'
+sim_config_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/config.json'
+sim_checkpoint_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/pytorch_model.bin'
+sim_dict_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/vocab.txt'
 
 # 建立分词器
 sim_tokenizer = Tokenizer(sim_dict_path, do_lower_case=True)  # 建立分词器
 
 # 建立加载模型
-simbert = build_transformer_model(sim_config_path, sim_checkpoint_path, with_pool='linear', application='unilm', dynamic_inherit=True).to(device)
+simbert = build_transformer_model(sim_config_path, sim_checkpoint_path, with_pool='linear', application='unilm', add_trainer=True).to(device)
 # ========== 蒸馏用：结束 ==========
 
 
@@ -128,7 +129,7 @@ def collate_fn(batch):
 
     return [batch_token_ids, batch_segment_ids], [batch_token_ids, batch_segment_ids, sims]
 
-train_dataloader = DataLoader(MyDataset('../datasets/data_similarity.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
+train_dataloader = DataLoader(MyDataset('E:/Github/bert4torch/examples/datasets/data_similarity.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
 # 建立加载模型
 class Model(BaseModel):
@@ -193,7 +194,7 @@ class SynonymsGenerator(AutoRegressiveDecoder):
 
     def generate(self, text, n=1, topk=5):
         token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)
-        output_ids = self.random_sample([token_ids, segment_ids], n, topk)  # 基于随机采样
+        output_ids = self.random_sample([token_ids, segment_ids], n=n, topk=topk)  # 基于随机采样
         return [tokenizer.decode(ids.cpu().numpy()) for ids in output_ids]
 
 

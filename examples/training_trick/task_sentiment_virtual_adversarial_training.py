@@ -4,7 +4,9 @@
 
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, text_segmentate, ListDataset, seed_everything, get_pool_emb, AdversarialTraining
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, text_segmentate, ListDataset, seed_everything, get_pool_emb
+from bert4torch.callbacks import AdversarialTraining
 import torch.nn as nn
 import torch
 import torch.optim as optim
@@ -14,9 +16,9 @@ import random
 
 maxlen = 256
 batch_size = 16
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 seed_everything(42)
 
@@ -39,9 +41,9 @@ class MyDataset(ListDataset):
                         D.append((t, int(label)))
         return D
 
-train_dataset = MyDataset(['F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.train.data'])
-valid_dataset = MyDataset(['F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.valid.data'])
-test_dataset = MyDataset(['F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.test.data'])
+train_dataset = MyDataset(['E:/data/corpus/sentence_classification/sentiment/sentiment.train.data'])
+valid_dataset = MyDataset(['E:/data/corpus/sentence_classification/sentiment/sentiment.valid.data'])
+test_dataset = MyDataset(['E:/data/corpus/sentence_classification/sentiment/sentiment.test.data'])
 
 # 理论上应该收集任务领域类的无监督数据，这里用所有的监督数据来作无监督数据
 unsup_dataset =  [sen for sen, _ in (train_dataset.data + valid_dataset.data + test_dataset.data)]
@@ -124,6 +126,6 @@ if __name__ == '__main__':
     evaluator = Evaluator()
     adversarial_train = AdversarialTraining('vat', adversarial={'adv_alpha': 1})  # 虚拟对抗
 
-    model.fit(train_dataloader, epochs=10, steps_per_epoch=None, callbacks=[evaluator])
+    model.fit(train_dataloader, epochs=10, steps_per_epoch=None, callbacks=[evaluator, adversarial_train])
 else:
     model.load_weights('best_model.pt')

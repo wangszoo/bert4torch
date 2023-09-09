@@ -5,7 +5,8 @@
 
 import torch
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, AutoRegressiveDecoder, get_pool_emb
+from bert4torch.snippets import sequence_padding, get_pool_emb
+from bert4torch.generation import AutoRegressiveDecoder
 from bert4torch.tokenizers import Tokenizer, load_vocab
 from bert4torch.snippets import WebServing
 
@@ -13,10 +14,10 @@ from bert4torch.snippets import WebServing
 maxlen = 32
 choice = 'simbert'  # simbert simbert_v2
 if choice == 'simbert':
-    args_model_path = "F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base"
+    args_model_path = "E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base"
     args_model = 'bert'
 else:
-    args_model_path = "F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base"
+    args_model_path = "E:/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base"
     args_model = 'roformer'
 
 # 加载simbert权重或simbert_v2
@@ -64,7 +65,7 @@ class SynonymsGenerator(AutoRegressiveDecoder):
 
     def generate(self, text, n=1, topk=5):
         token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)
-        output_ids = self.random_sample([token_ids, segment_ids], n, topk)  # 基于随机采样
+        output_ids = self.random_sample([token_ids, segment_ids], n=n, topk=topk)  # 基于随机采样
         return [tokenizer.decode(ids.cpu().numpy()) for ids in output_ids]
 
 

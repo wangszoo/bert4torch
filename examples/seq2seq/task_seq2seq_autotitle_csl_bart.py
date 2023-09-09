@@ -3,13 +3,13 @@
 
 from bert4torch.models import build_transformer_model, BaseModel
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, seed_everything
-from bert4torch.snippets import AutoRegressiveDecoder, Callback
+from bert4torch.snippets import sequence_padding, seed_everything, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from bert4torch.snippets import ListDataset
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from tqdm import tqdm
 import json
@@ -23,9 +23,9 @@ epochs = 50
 steps_per_epoch = None
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/bart/[FudanNLP_torch_base]/bert4torch_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bart/[FudanNLP_torch_base]/bert4torch_pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bart/[FudanNLP_torch_base]/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bart/[FudanNLP_torch_base]/bert4torch_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bart/[FudanNLP_torch_base]/bert4torch_pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bart/[FudanNLP_torch_base]/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 seed_everything(42)
@@ -66,18 +66,18 @@ def collate_fn(batch):
     batch_titile_ids = torch.tensor(sequence_padding(batch_titile_ids), dtype=torch.long, device=device)
     return [[batch_content_ids], [batch_titile_ids[:, :-1]]], batch_titile_ids[:, 1:].flatten()
 
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_train.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
-test_dataset = MyDataset('F:/Projects/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
+valid_dataset = MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_dev.json')
+test_dataset = MyDataset('E:/data/corpus/seq2seq/summary/csl_title_public/csl_title_test.json')
 
-model = build_transformer_model(config_path, checkpoint_path, model='bart', keep_tokens=keep_tokens, segment_vocab_size=0, dynamic_inherit=True).to(device)
+model = build_transformer_model(config_path, checkpoint_path, model='bart', keep_tokens=keep_tokens, segment_vocab_size=0, add_trainer=True).to(device)
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     def forward(self, outputs, y_true):
-        _, _, y_pred = outputs
+        y_pred = outputs[-1]
         y_pred = y_pred.reshape(-1, y_pred.shape[-1])
         return super().forward(y_pred, y_true)
 model.compile(loss=CrossEntropyLoss(ignore_index=0), optimizer=optim.Adam(model.parameters(), 1.5e-5))
@@ -87,13 +87,14 @@ class AutoTitle(AutoRegressiveDecoder):
     """
     @AutoRegressiveDecoder.wraps(default_rtype='logits')
     def predict(self, inputs, output_ids, states):
-        return model.decoder.predict([output_ids] + inputs)[-1][:, -1, :]  # 保留最后一位
+        res = model.decoder.predict([output_ids] + inputs)
+        return res[-1][:, -1, :] if isinstance(res, list) else res[:, -1, :]  # 保留最后一位
 
     def generate(self, text, topk=1):
         token_ids, _ = tokenizer.encode(text, maxlen=max_c_len)
         token_ids = torch.tensor([token_ids], device=device)
         encoder_output = model.encoder.predict([token_ids])
-        output_ids = self.beam_search(encoder_output, topk=topk)  # 基于beam search
+        output_ids = self.beam_search(encoder_output, topk=topk)[0]  # 基于beam search
         return tokenizer.decode(output_ids.cpu().numpy())
 
 autotitle = AutoTitle(start_id=tokenizer._token_end_id, end_id=tokenizer._token_end_id, maxlen=max_t_len, device=device)

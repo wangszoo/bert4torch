@@ -6,8 +6,8 @@ from bert4torch.tokenizers import Tokenizer
 import torch
 
 # 加载模型，请更换成自己的路径
-root_model_path = "F:/Projects/pretrain_ckpt/ernie/[baidu_torch_base]--ernie-1-base-zh"
-# root_model_path = "F:/Projects/pretrain_ckpt/ernie/[baidu_torch_base]--ernie-3-base-zh"
+root_model_path = "E:/pretrain_ckpt/ernie/[baidu_torch_base]--ernie-1-base-zh"
+# root_model_path = "E:/pretrain_ckpt/ernie/[baidu_torch_base]--ernie-3-base-zh"
 
 vocab_path = root_model_path + "/vocab.txt"
 config_path = root_model_path + "/config.json"
@@ -18,8 +18,7 @@ checkpoint_path = root_model_path + '/pytorch_model.bin'
 tokenizer = Tokenizer(vocab_path, do_lower_case=True)
 model = build_transformer_model(config_path, checkpoint_path, model='ERNIE', with_mlm='softmax')  # 建立模型，加载权重
 
-token_ids, segments_ids = tokenizer.encode("科学技术是第一生产力")
-token_ids[3] = token_ids[4] = tokenizer._token_mask_id
+token_ids, segments_ids = tokenizer.encode("科学[MASK][MASK]是第一生产力")
 print(''.join(tokenizer.ids_to_tokens(token_ids)))
 
 tokens_ids_tensor = torch.tensor([token_ids])

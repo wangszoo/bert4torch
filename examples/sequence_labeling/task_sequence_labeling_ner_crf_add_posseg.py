@@ -8,13 +8,15 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, seed_everything
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, seed_everything
 from bert4torch.layers import CRF
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
 from tqdm import tqdm
 import jieba.posseg as psg
 from collections import Counter
+import re
 
 maxlen = 256
 batch_size = 16
@@ -23,9 +25,9 @@ categories_id2label = {i: k for i, k in enumerate(categories)}
 categories_label2id = {k: i for i, k in enumerate(categories)}
 
 # BERT base
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 固定seed
@@ -83,8 +85,9 @@ def collate_fn(batch):
         for i, j in enumerate(mapping):
             if j:
                 start, end = j[0], j[-1]  # token在原始text的首尾位置
-                token_new = (''.join(seg_word[start:end+1])).lower()
-                assert tokens[i] == token_new, f"{tokens[i]} -> {token_new}"
+                # 校正
+                # token_new = (''.join(seg_word[start:end+1])).lower()
+                # assert re.sub('^##', '', tokens[i]) == token_new, f"{tokens[i]} -> {token_new}"
                 if start == end:
                     psg_ids[i] = psg_map.get(seg_p[start], 0)  # 不在字典里给0
                 else:
@@ -97,21 +100,22 @@ def collate_fn(batch):
     return [batch_token_ids, batch_psg_ids], batch_labels
 
 # 转换数据集
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/ner/china-people-daily-ner-corpus/example.train'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/ner/china-people-daily-ner-corpus/example.dev'), batch_size=batch_size, collate_fn=collate_fn) 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/ner/china-people-daily-ner-corpus/example.train'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
+valid_dataloader = DataLoader(MyDataset('E:/data/corpus/ner/china-people-daily-ner-corpus/example.dev'), batch_size=batch_size, collate_fn=collate_fn) 
 
 # 定义bert上的模型结构
 class Model(BaseModel):
     def __init__(self):
         super().__init__()
-        layer_add_embs = nn.Embedding(len(psg_map)+1, 768)
+        self.psg_emb = nn.Embedding(len(psg_map)+1, 768)
         self.bert = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, segment_vocab_size=0, 
-                                            layer_add_embs=layer_add_embs)
+                                            additional_embs=True)
         self.fc = nn.Linear(768, len(categories))
         self.crf = CRF(len(categories))
 
     def forward(self, token_ids, psg_ids):
-        sequence_output = self.bert([token_ids, psg_ids])  # [btz, seq_len, hdsz]
+        psg_emb = self.psg_emb(psg_ids)  # 词性的embedding
+        sequence_output = self.bert([token_ids, psg_emb])  # [btz, seq_len, hdsz]
         emission_score = self.fc(sequence_output)  # [bts, seq_len, tag_size]
         attention_mask = token_ids.gt(0)
         return emission_score, attention_mask

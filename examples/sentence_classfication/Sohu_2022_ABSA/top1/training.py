@@ -10,7 +10,9 @@ from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, text_segmentate, seed_everything, AdversarialTraining
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, text_segmentate, seed_everything
+from bert4torch.callbacks import AdversarialTraining
 from bert4torch.optimizers import get_linear_schedule_with_warmup
 from bert4torch.tokenizers import Tokenizer, SpTokenizer
 from bert4torch.models import build_transformer_model, BaseModel
@@ -22,7 +24,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # 配置设置
-pretrain_model = 'F:/Projects/pretrain_ckpt/xlnet/[hit_torch_base]--chinese-xlnet-base'
+pretrain_model = 'E:/pretrain_ckpt/xlnet/[hit_torch_base]--chinese-xlnet-base'
 config_path = pretrain_model + '/bert4torch_config.json'
 checkpoint_path = pretrain_model + '/pytorch_model.bin'
 data_dir = 'E:/Github/Sohu2022/Sohu2022_data/nlp_data'
@@ -83,7 +85,8 @@ def collate_fn(batch):
         batch_entity_ids.append(ent_ids)
         batch_entity_labels.append([categories.index(label) for label in entity.values()])
 
-    batch_token_ids = torch.tensor(sequence_padding(batch_token_ids), dtype=torch.long, device=device)
+    # 20230513: 修改bug，xlnet的pad_id=5，所以padding和下面build_transformer_model要指定一下
+    batch_token_ids = torch.tensor(sequence_padding(batch_token_ids, value=tokenizer.pad_token_id), dtype=torch.long, device=device)
     batch_segment_ids = torch.tensor(sequence_padding(batch_segment_ids), dtype=torch.long, device=device)
     batch_entity_ids = torch.tensor(sequence_padding(batch_entity_ids), dtype=torch.long, device=device)
     batch_entity_labels = torch.tensor(sequence_padding(batch_entity_labels, value=-1), dtype=torch.long, device=device)  # [btz, 实体个数]
@@ -100,7 +103,7 @@ valid_dataloader = DataLoader(ListDataset(data=all_data[:split_index]), batch_si
 class Model(BaseModel):
     def __init__(self):
         super().__init__() 
-        self.bert = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model='xlnet')
+        self.bert = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, model='xlnet', pad_token_id=tokenizer.pad_token_id)
         hidden_size = self.bert.configs['hidden_size']
         self.classifier = nn.Sequential(
                 nn.Linear(hidden_size, hidden_size),
@@ -109,7 +112,7 @@ class Model(BaseModel):
                 nn.Linear(hidden_size, 5)
                 )
 
-    def forward(self, inputs):
+    def forward(self, *inputs):
         token_ids, segment_ids, entity_ids = inputs
         last_hidden_state = self.bert([token_ids, segment_ids])  # [btz, seq_len, hdsz]
 
@@ -124,7 +127,7 @@ class Loss(nn.CrossEntropyLoss):
         loss = super().forward(entity_logit.reshape(-1, entity_logit.shape[-1]), labels.flatten())
         return loss
 optimizer = optim.AdamW(model.parameters(), lr=5e-5)
-scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps=len(train_dataloader)*epochs, last_epoch=-1)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps=len(train_dataloader)*epochs, last_epoch=-1)  # torch4keras>=0.0.8后需要设置为len(train_dataloader)*epochs//grad_accumulation_steps
 model.compile(loss=Loss(ignore_index=-1), optimizer=optimizer, scheduler=scheduler, clip_grad_norm=1.0, 
                grad_accumulation_steps=grad_accumulation_steps)
 

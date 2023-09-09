@@ -1,3 +1,6 @@
+'''Loss
+'''
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,8 +18,8 @@ class FocalLoss(nn.Module):
 
     def forward(self, input, target):
         """
-        input: [N, C]
-        target: [N, ]
+        :param input: torch.Tensor, shape=[N, C]
+        :param target: torch.Tensor, shape=[N, ]
         """
         logpt = F.log_softmax(input, dim=1)
         pt = torch.exp(logpt)
@@ -33,6 +36,10 @@ class LabelSmoothingCrossEntropy(nn.Module):
         self.ignore_index = ignore_index
 
     def forward(self, output, target):
+        """
+        :param output: torch.Tensor, shape=[N, C]
+        :param target: torch.Tensor, shape=[N, ]
+        """
         c = output.size()[-1]
         log_preds = F.log_softmax(output, dim=-1)
         if self.reduction=='sum':
@@ -46,17 +53,17 @@ class LabelSmoothingCrossEntropy(nn.Module):
 
 
 class MultilabelCategoricalCrossentropy(nn.Module):
-    """多标签分类的交叉熵
+    """多标签分类的交叉熵；
     说明：y_true和y_pred的shape一致，y_true的元素非0即1， 1表示对应的类为目标类，0表示对应的类为非目标类。
-    警告：请保证y_pred的值域是全体实数，换言之一般情况下y_pred不用加激活函数，尤其是不能加sigmoid或者softmax！预测
-         阶段则输出y_pred大于0的类。如有疑问，请仔细阅读并理解本文。
+    警告：请保证y_pred的值域是全体实数，换言之一般情况下y_pred不用加激活函数，尤其是不能加sigmoid或者softmax！预测阶段则输出y_pred大于0的类。如有疑问，请仔细阅读并理解本文。
     参考：https://kexue.fm/archives/7359
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     def forward(self, y_pred, y_true):
-        """ y_true ([Tensor]): [..., num_classes]
-            y_pred ([Tensor]): [..., num_classes]
+        """
+        :param y_true: torch.Tensor, [..., num_classes]
+        :param y_pred: torch.Tensor: [..., num_classes]
         """
         y_pred = (1-2*y_true) * y_pred
         y_pred_pos = y_pred - (1-y_true) * 1e12
@@ -70,13 +77,9 @@ class MultilabelCategoricalCrossentropy(nn.Module):
 
 
 class SparseMultilabelCategoricalCrossentropy(nn.Module):
-    """稀疏版多标签分类的交叉熵
-    说明：
-        1. y_true.shape=[..., num_positive]，
-           y_pred.shape=[..., num_classes]；
-        2. 请保证y_pred的值域是全体实数，换言之一般情况下y_pred不用加激活函数，尤其是不能加sigmoid或者softmax；
-        3. 预测阶段则输出y_pred大于0的类；
-        4. 详情请看：https://kexue.fm/archives/7359 。
+    """稀疏版多标签分类的交叉熵；
+       请保证y_pred的值域是全体实数，换言之一般情况下y_pred不用加激活函数，尤其是不能加sigmoid或者softmax，预测阶段则输出y_pred大于0的类；
+       详情请看：https://kexue.fm/archives/7359，https://kexue.fm/archives/8888
     """
     def __init__(self, mask_zero=False, epsilon=1e-7, **kwargs):
         super().__init__(**kwargs)
@@ -84,13 +87,17 @@ class SparseMultilabelCategoricalCrossentropy(nn.Module):
         self.epsilon = epsilon
         
     def forward(self, y_pred, y_true):
+        '''
+        :param y_true: shape=[..., num_positive]
+        :param y_pred: shape=[..., num_classes]
+        '''
         zeros = torch.zeros_like(y_pred[..., :1])
         y_pred = torch.cat([y_pred, zeros], dim=-1)
         if self.mask_zero:
             infs = zeros + float('inf')
             y_pred = torch.cat([infs, y_pred[..., 1:]], dim=-1)
-        y_pos_2 = torch.gather(y_pred, dim=-1, index=y_true)
-        y_pos_1 = torch.cat([y_pos_2, zeros], dim=-1)
+        y_pos_2 = torch.gather(y_pred, dim=-1, index=y_true)  # [..., num_positive]
+        y_pos_1 = torch.cat([y_pos_2, zeros], dim=-1)  # [..., num_positive+1]
         if self.mask_zero:
             y_pred = torch.cat([-infs, y_pred[..., 1:]], dim=-1)
             y_pos_2 = torch.gather(y_pred, dim=-1, index=y_true)
@@ -106,6 +113,10 @@ class ContrastiveLoss(nn.Module):
     """对比损失：减小正例之间的距离，增大正例和反例之间的距离
     公式：labels * distance_matrix.pow(2) + (1-labels)*F.relu(margin-distance_matrix).pow(2)
     https://www.sbert.net/docs/package_reference/losses.html
+
+    :param margin: float, 距离参数，distance>margin时候不参加梯度回传，默认为0.5
+    :param size_average: bool, 是否对loss在样本维度上求均值，默认为True
+    :param online: bool, 是否使用OnlineContrastiveLoss, 即仅计算困难样本的loss, 默认为False
     """
     def __init__(self, margin=0.5, size_average=True, online=False):
         super(ContrastiveLoss, self).__init__()
@@ -114,6 +125,12 @@ class ContrastiveLoss(nn.Module):
         self.online = online
 
     def forward(self, distances, labels, pos_id=1, neg_id=0):
+        """
+        :param distances: torch.Tensor, 样本对之间的预测距离, shape=[btz]
+        :param labels: torch.Tensor, 样本对之间的真实距离, shape=[btz]
+        :param pos_id: int, 正样本的label
+        :param neg_id: int, 负样本的label
+        """
         if not self.online:
             losses = 0.5 * (labels.float() * distances.pow(2) + (1 - labels).float() * F.relu(self.margin - distances).pow(2))
             return losses.mean() if self.size_average else losses.sum()
@@ -132,6 +149,9 @@ class ContrastiveLoss(nn.Module):
 
 class RDropLoss(nn.Module):
     '''R-Drop的Loss实现，官方项目：https://github.com/dropreg/R-Drop
+
+    :param alpha: float, 控制rdrop的loss的比例
+    :param rank: str, 指示y_pred的排列方式, 支持['adjacent', 'updown']
     '''
     def __init__(self, alpha=4, rank='adjacent'):
         super().__init__()
@@ -144,6 +164,11 @@ class RDropLoss(nn.Module):
 
     def forward(self, *args):
         '''支持两种方式: 一种是y_pred, y_true, 另一种是y_pred1, y_pred2, y_true
+
+        :param y_pred: torch.Tensor, 第一种方式的样本预测值, shape=[btz*2, num_labels]
+        :param y_true: torch.Tensor, 样本真实值, 第一种方式shape=[btz*2,], 第二种方式shape=[btz,]
+        :param y_pred1: torch.Tensor, 第二种方式的样本预测值, shape=[btz, num_labels]
+        :param y_pred2: torch.Tensor, 第二种方式的样本预测值, shape=[btz, num_labels]
         '''
         assert len(args) in {2, 3}, 'RDropLoss only support 2 or 3 input args'
         # y_pred是1个Tensor
@@ -161,7 +186,7 @@ class RDropLoss(nn.Module):
         # y_pred是两个tensor
         else:
             y_pred1, y_pred2, y_true = args
-            loss_sup = self.loss_sup(y_pred1, y_true)
+            loss_sup = (self.loss_sup(y_pred1, y_true) + self.loss_sup(y_pred2, y_true)) / 2
 
         loss_rdrop1 = self.loss_rdrop(F.log_softmax(y_pred1, dim=-1), F.softmax(y_pred2, dim=-1))
         loss_rdrop2 = self.loss_rdrop(F.log_softmax(y_pred2, dim=-1), F.softmax(y_pred1, dim=-1))
@@ -171,8 +196,14 @@ class RDropLoss(nn.Module):
 class UDALoss(nn.Module):
     '''UDALoss，使用时候需要继承一下，因为forward需要使用到global_step和total_steps
     https://arxiv.org/abs/1904.12848
+
+    :param tsa_schedule: str, tsa策略，可选['linear_schedule', 'exp_schedule', 'log_schedule']
+    :param start_p: float, tsa生效概率下限, 默认为0
+    :param end_p: float, tsa生效概率上限, 默认为1
+    :param return_all_loss: bool, 是否返回所有的loss，默认为True
+    :return: loss
     '''
-    def __init__(self, tsa_schedule=None, total_steps=None, start_p=0, end_p=1, return_all_loss=True):
+    def __init__(self, tsa_schedule=None, start_p=0, end_p=1, return_all_loss=True):
         super().__init__()
         self.loss_sup = nn.CrossEntropyLoss()
         self.loss_unsup = nn.KLDivLoss(reduction='batchmean')
@@ -184,6 +215,13 @@ class UDALoss(nn.Module):
         self.return_all_loss = return_all_loss
 
     def forward(self, y_pred, y_true_sup, global_step, total_steps):
+        ''' y_pred由[pred_sup, true_unsup, pred_unsup]三部分组成
+        
+        :param y_pred: torch.Tensor, 样本预测值, shape=[btz_sup+btz_unsup*2, num_labels]
+        :param y_true_sup: torch.Tensor, 样本真实值, shape=[btz_sup,]
+        :param global_step: int, 当前训练步数
+        :param total_steps: int, 训练总步数
+        '''
         sup_size = y_true_sup.size(0)
         unsup_size = (y_pred.size(0) - sup_size) // 2
 
@@ -223,9 +261,10 @@ class UDALoss(nn.Module):
 
 class TemporalEnsemblingLoss(nn.Module):
     '''TemporalEnsembling的实现，思路是在监督loss的基础上，增加一个mse的一致性损失loss
-       官方项目：https://github.com/s-laine/tempens
-       pytorch第三方实现：https://github.com/ferretj/temporal-ensembling
-       使用的时候，train_dataloader的shffle必须未False
+
+       - 官方项目：https://github.com/s-laine/tempens
+       - pytorch第三方实现：https://github.com/ferretj/temporal-ensembling
+       - 使用的时候，train_dataloader的shffle必须未False
     '''
     def __init__(self, epochs, max_val=10.0, ramp_up_mult=-5.0, alpha=0.5, max_batch_num=100, hist_device='cpu'):
         super().__init__()
@@ -242,6 +281,13 @@ class TemporalEnsemblingLoss(nn.Module):
         assert (self.alpha >= 0) & (self.alpha < 1)  # 等于1的时候upata写分母为0
 
     def forward(self, y_pred_sup, y_pred_unsup, y_true_sup, epoch, bti):
+        """
+        :param y_pred_sup: torch.Tensor, 监督学习样本预测值, shape=[btz, num_labels]
+        :param y_pred_unsup: torch.Tensor, 无监督学习样本预测值, shape=[btz, num_labels]
+        :param y_true_sup: int, 监督学习样本真实值, shape=[btz,]
+        :param epoch: int, 当前epoch
+        :param bti: int, 当前batch的序号
+        """
         self.same_batch_check(y_pred_sup, y_pred_unsup, y_true_sup, bti)
         
         if (self.max_batch_num is None) or (bti < self.max_batch_num):
@@ -261,8 +307,7 @@ class TemporalEnsemblingLoss(nn.Module):
             return self.loss_sup(y_pred_sup, y_true_sup)
 
     def same_batch_check(self, y_pred_sup, y_pred_unsup, y_true_sup, bti):
-        '''检测数据的前几个batch必须是一致的, 这里写死是10个
-        '''
+        '''检测数据的前几个batch必须是一致的, 这里写死是10个'''
         if bti >= 10:
             return
         if bti >= len(self.hist_input_y):
@@ -302,3 +347,73 @@ class TemporalEnsemblingLoss(nn.Module):
         if bti >= len(self.hist_sup):
             self.hist_sup.append(torch.zeros_like(y_pred_sup).to(self.hist_device))
             self.hist_unsup.append(torch.zeros_like(y_pred_unsup).to(self.hist_device))
+
+
+class DPOLoss:
+    ''' DPO算法的loss计算
+    :param pad_token_id: pad的token_id, 用于计算mask
+    :param beta: float, dpo中beta参数
+    :param reference_free: bool, 默认为False
+    :param average_log_prob: bool, 是否对log_prob去均值，默认为False
+    :param prefix: 进度条展示指标的前缀
+    '''
+    def __init__(self, pad_token_id=0, beta=0.1, reference_free=False, average_log_prob=False, prefix='') -> None:
+        self.pad_token_id = pad_token_id
+        self.beta = beta
+        self.reference_free = reference_free
+        self.average_log_prob = average_log_prob
+        self.prefix = prefix
+    
+    def __call__(self, logits, labels):
+        '''
+        :param logit: tuple/list, 分别表示policy_logits, reference_logits，tensor中前一半为chosen，后一半为rejected
+        :param labels: 真实标签
+        '''
+        policy_logits, reference_logits = logits
+        pol_chosen_logps, pol_rejected_logps = self._get_batch_logps(policy_logits, labels)
+        ref_chosen_logps, ref_rejected_logps = self._get_batch_logps(reference_logits, labels)
+
+        pi_logratios = pol_chosen_logps - pol_rejected_logps
+        ref_logratios = ref_chosen_logps - ref_rejected_logps
+
+        if self.reference_free:
+            ref_logratios = 0
+
+        logits = pi_logratios - ref_logratios
+
+        losses = -F.logsigmoid(self.beta * logits)
+        chosen_rewards = self.beta * (pol_chosen_logps - ref_chosen_logps).detach()
+        rejected_rewards = self.beta * (pol_rejected_logps - ref_rejected_logps).detach()
+        reward_accuracies = (chosen_rewards > rejected_rewards).float()
+
+        loss_detail = {'loss': losses.mean()}
+        loss_detail[f"{self.prefix}chosen"] = chosen_rewards.cpu().numpy().mean()
+        loss_detail[f"{self.prefix}rejected"] = rejected_rewards.cpu().numpy().mean()
+        loss_detail[f"{self.prefix}accuracies"] = reward_accuracies.cpu().numpy().mean()
+        loss_detail[f"{self.prefix}margins"] = (chosen_rewards - rejected_rewards).cpu().numpy().mean()
+        return loss_detail
+
+    def _get_batch_logps(self, logits, labels):
+        """Compute the log probabilities of the given labels under the given logits.
+        """
+        if logits.shape[:-1] != labels.shape:
+            raise ValueError("Logits (batch and sequence length dim) and labels must have the same shape.")
+
+        labels = labels[:, 1:].clone()  # labels取从1到n
+        logits = logits[:, :-1, :]  # logits去从0到n-1
+        loss_mask = labels != self.pad_token_id  # 仅计算非padding部分
+
+        # dummy token; we'll ignore the losses on these tokens later
+        labels[labels == self.pad_token_id] = 0
+
+        per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
+
+        if self.average_log_prob:
+            all_logps = (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
+        else:
+            all_logps =  (per_token_logps * loss_mask).sum(-1)
+
+        split = labels.shape[0] // 2
+        chosen_logps = all_logps[:split]
+        rejected_logps = all_logps[split:]
+        return chosen_logps, rejected_logps

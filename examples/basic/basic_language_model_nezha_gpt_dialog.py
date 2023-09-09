@@ -1,17 +1,17 @@
 #! -*- coding: utf-8 -*-
 # NEZHA模型做闲聊任务，这里只提供了测试脚本
 # 源项目：https://github.com/bojone/nezha_gpt_dialog
-# 权重转换脚本见：https://github.com/Tongjilibo/bert4torch/blob/master/examples/convert_script/convert_nezha_gpt_dialog.py
+# 权重转换脚本见：https://github.com/Tongjilibo/bert4torch/blob/master/convert_script/convert_nezha_gpt_dialog.py
 
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer
-from bert4torch.snippets import AutoRegressiveDecoder
+from bert4torch.generation import AutoRegressiveDecoder
 import torch
 
 # nezha配置
-config_path = 'F:/Projects/pretrain_ckpt/nezha/[sushen_tf_base]--nezha_gpt_dialog/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/nezha/[sushen_tf_base]--nezha_gpt_dialog/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/nezha/[sushen_tf_base]--nezha_gpt_dialog/vocab.txt'
+config_path = 'E:/pretrain_ckpt/nezha/[sushen_tf_base]--nezha_gpt_dialog/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/nezha/[sushen_tf_base]--nezha_gpt_dialog/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/nezha/[sushen_tf_base]--nezha_gpt_dialog/vocab.txt'
 
 # 建立分词器
 tokenizer = Tokenizer(dict_path, do_lower_case=True)
@@ -42,7 +42,7 @@ class ChatBot(AutoRegressiveDecoder):
             ids = tokenizer.encode(text)[0][1:]
             token_ids.extend(ids)
             segment_ids.extend([i % 2] * len(ids))
-        results = self.random_sample([token_ids, segment_ids], 1, topk)
+        results = self.random_sample([token_ids, segment_ids], n=1, topk=topk)
         return tokenizer.decode(results[0].cpu().numpy())
 
 

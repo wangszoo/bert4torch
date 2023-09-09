@@ -9,7 +9,9 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, ListDataset, text_segmentate, AutoRegressiveDecoder, Callback, get_pool_emb
+from bert4torch.snippets import sequence_padding, ListDataset, text_segmentate, get_pool_emb
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 from bert4torch.tokenizers import Tokenizer, load_vocab
 
 # 基本信息
@@ -18,9 +20,9 @@ batch_size = 32
 
 # 这里加载的是simbert权重，在此基础上用自己的数据继续pretrain/finetune
 # 自己从头预训练也可以直接加载bert/roberta等checkpoint
-config_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载并精简词表，建立分词器
@@ -143,7 +145,7 @@ class SynonymsGenerator(AutoRegressiveDecoder):
 
     def generate(self, text, n=1, topk=5):
         token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)
-        output_ids = self.random_sample([token_ids, segment_ids], n, topk)  # 基于随机采样
+        output_ids = self.random_sample([token_ids, segment_ids], n=n, topk=topk)  # 基于随机采样
         return [tokenizer.decode(ids.cpu().numpy()) for ids in output_ids]
 
 

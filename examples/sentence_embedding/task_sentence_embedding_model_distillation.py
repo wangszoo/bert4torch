@@ -3,7 +3,8 @@
 # 初测测试指标从80%降到77%左右，未细测
 
 from task_sentence_embedding_sup_CosineMSELoss import model, train_dataloader, Model, device, valid_dataloader, evaluate
-from bert4torch.snippets import Callback, get_pool_emb
+from bert4torch.snippets import get_pool_emb
+from bert4torch.callbacks import Callback
 import torch.optim as optim
 import torch.nn as nn
 from bert4torch.models import build_transformer_model
@@ -25,7 +26,7 @@ print('train_embeddings done, start model distillation...')
 class NewModel(Model):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+        config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
         self.bert = build_transformer_model(config_path=config_path, with_pool=True, segment_vocab_size=0, keep_hidden_layers=[1,4,7])
 
     def forward(self, token_ids):

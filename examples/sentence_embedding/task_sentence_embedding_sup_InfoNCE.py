@@ -5,7 +5,8 @@
 
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, get_pool_emb, seed_everything
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, get_pool_emb, seed_everything
 import torch.nn as nn
 import torch
 import torch.optim as optim
@@ -15,6 +16,7 @@ from scipy.stats import spearmanr
 import random
 from tqdm import tqdm
 import sys
+import numpy as np
 
 # =============================基本参数=============================
 # pooling, task_name = sys.argv[1:]  # 传入参数
@@ -25,9 +27,9 @@ assert pooling in {'first-last-avg', 'last-avg', 'cls', 'pooler'}
 
 maxlen = 64 if task_name != 'PAWSX' else 128
 batch_size = 32
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 seed_everything(42)
 
@@ -80,7 +82,7 @@ def get_data(filename):
             train_samples.append((random.choice(list(others['1'])), sent1, random.choice(list(others['0']))))
     return train_samples
 
-train_data = get_data(f'F:/Projects/data/corpus/sentence_embedding/{task_name}/{task_name}.train.data')
+train_data = get_data(f'E:/data/corpus/sentence_embedding/{task_name}/{task_name}.train.data')
 train_dataloader = DataLoader(ListDataset(data=train_data), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
 class MyDataset(ListDataset):
@@ -113,8 +115,8 @@ def collate_fn_eval(batch):
     return (batch_token1_ids, batch_token2_ids), batch_labels.flatten()
 
 # 加载数据集
-valid_dataloader = DataLoader(MyDataset(f'F:/Projects/data/corpus/sentence_embedding/{task_name}/{task_name}.valid.data'), batch_size=batch_size, collate_fn=collate_fn_eval)
-test_dataloader = DataLoader(MyDataset(f'F:/Projects/data/corpus/sentence_embedding/{task_name}/{task_name}.test.data'), batch_size=batch_size, collate_fn=collate_fn_eval)
+valid_dataloader = DataLoader(MyDataset(f'E:/data/corpus/sentence_embedding/{task_name}/{task_name}.valid.data'), batch_size=batch_size, collate_fn=collate_fn_eval)
+test_dataloader = DataLoader(MyDataset(f'E:/data/corpus/sentence_embedding/{task_name}/{task_name}.test.data'), batch_size=batch_size, collate_fn=collate_fn_eval)
 
 # 建立模型
 class Model(BaseModel):
@@ -127,7 +129,7 @@ class Model(BaseModel):
                                             with_pool=with_pool, output_all_encoded_layers=output_all_encoded_layers)
         self.scale = scale
     
-    def forward(self, token_ids_list):
+    def forward(self, *token_ids_list):
         reps = []
         for token_ids in token_ids_list:
             hidden_state1, pooler = self.bert([token_ids])
@@ -176,20 +178,21 @@ class Evaluator(Callback):
         print(f'valid_consine: {val_consine:.5f}, test_consine: {test_consine:.5f}, best_val_consine: {self.best_val_consine:.5f}\n')
         
         # 重新生成dataloader，重新random选择样本
-        train_data = get_data(f'F:/Projects/data/corpus/sentence_embedding/{task_name}/{task_name}.train.data')
+        train_data = get_data(f'E:/data/corpus/sentence_embedding/{task_name}/{task_name}.train.data')
         model.train_dataloader = DataLoader(ListDataset(data=train_data), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
     # 定义评价函数
     def evaluate(self, data):
-        embeddings1, embeddings2, labels = [], [], []
-        for (batch_token_ids1, batch_token_ids2), batch_labels in tqdm(data, desc='Evaluate'):
-            embeddings1.append(model.predict(batch_token_ids1))
-            embeddings2.append(model.predict(batch_token_ids2))
-            labels.append(batch_labels)
-        embeddings1 = torch.cat(embeddings1).cpu().numpy()
-        embeddings2 = torch.cat(embeddings2).cpu().numpy()
-        labels = torch.cat(labels).cpu().numpy()
-        cosine_scores = 1 - (paired_cosine_distances(embeddings1, embeddings2))  # cosine距离是1-paired
+        cosine_scores, labels = [], []
+        for (batch_token1_ids, batch_token2_ids), batch_labels in tqdm(data, desc='Evaluate'):
+            embeddings1 = model.predict(batch_token1_ids).cpu().numpy()
+            embeddings2 = model.predict(batch_token2_ids).cpu().numpy()
+            cosine_score = 1 - paired_cosine_distances(embeddings1, embeddings2)
+            cosine_scores.append(cosine_score)
+            labels.append(batch_labels.cpu().numpy())
+        labels = np.concatenate(labels)
+        cosine_scores = np.concatenate(cosine_scores)
+
         eval_pearson_cosine, _ = spearmanr(labels, cosine_scores)
         return eval_pearson_cosine
 

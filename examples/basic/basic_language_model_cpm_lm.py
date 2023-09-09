@@ -7,15 +7,15 @@
 import numpy as np
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import SpTokenizer
-from bert4torch.snippets import AutoRegressiveDecoder
+from bert4torch.generation import AutoRegressiveDecoder
 import torch
 import jieba
 jieba.initialize()
 
 # 模型路径
-config_path = 'F:/Projects/pretrain_ckpt/gpt2/[cpm_gpt2_torch]--cpm_lm_2.6b/bert4torch_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/gpt2/[cpm_gpt2_torch]--cpm_lm_2.6b/bert4torch_pytorch_model.bin'
-spm_path = 'F:/Projects/pretrain_ckpt/gpt2/[cpm_gpt2_torch]--cpm_lm_2.6b/chinese_vocab.model'
+config_path = 'E:/pretrain_ckpt/gpt2/[cpm_gpt2_torch]--cpm_lm_2.6b/bert4torch_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/gpt2/[cpm_gpt2_torch]--cpm_lm_2.6b/bert4torch_pytorch_model.bin'
+spm_path = 'E:/pretrain_ckpt/gpt2/[cpm_gpt2_torch]--cpm_lm_2.6b/chinese_vocab.model'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def pre_tokenize(text):
@@ -43,7 +43,7 @@ model = build_transformer_model(
 class TextExpansion(AutoRegressiveDecoder):
     """基于随机采样的文本续写
     """
-    @AutoRegressiveDecoder.wraps(default_rtype='probas')
+    @AutoRegressiveDecoder.wraps(default_rtype='logits')
     def predict(self, inputs, output_ids, states):
         token_ids = torch.cat([inputs[0], output_ids], 1)
         logits = model.predict([token_ids])
@@ -54,7 +54,7 @@ class TextExpansion(AutoRegressiveDecoder):
         可以考虑将解码方式换为beam search。
         """
         token_ids, _ = tokenizer.encode(text)
-        results = self.random_sample([token_ids], n, topp=topp, temperature=temperature)  # 基于随机采样
+        results = self.random_sample([token_ids], n=n, topp=topp, temperature=temperature)  # 基于随机采样
         results = [token_ids + [int(i) for i in ids.cpu().numpy()] for ids in results]
         texts = [tokenizer.decode(ids) for ids in results]
         return [self.post_replace(text) for text in texts]

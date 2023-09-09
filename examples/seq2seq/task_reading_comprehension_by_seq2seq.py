@@ -5,8 +5,9 @@
 import json, os
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, text_segmentate
-from bert4torch.snippets import AutoRegressiveDecoder, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, text_segmentate, ListDataset
+from bert4torch.generation import AutoRegressiveDecoder
+from bert4torch.callbacks import Callback
 from tqdm import tqdm
 import torch
 from torchinfo import summary
@@ -25,18 +26,18 @@ batch_size = 8
 epochs = 10
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def process_data():
-    if os.path.exists('F:/Projects/data/corpus/qa/CIPS-SOGOU/train_data.json'):
+    if os.path.exists('E:/data/corpus/qa/CIPS-SOGOU/train_data.json'):
         return
 
     # 标注数据
-    webqa_data = json.load(open('F:/Projects/data/corpus/qa/WebQA.json', encoding='utf-8'))
-    sogou_data = json.load(open('F:/Projects/data/corpus/qa/SogouQA.json', encoding='utf-8'))
+    webqa_data = json.load(open('E:/data/corpus/qa/WebQA.json', encoding='utf-8'))
+    sogou_data = json.load(open('E:/data/corpus/qa/SogouQA.json', encoding='utf-8'))
 
     # 保存一个随机序（供划分valid用）
     random_order = list(range(len(sogou_data)))
@@ -49,8 +50,8 @@ def process_data():
     train_data.extend(train_data)
     train_data.extend(webqa_data)  # 将SogouQA和WebQA按2:1的比例混合
 
-    json.dump(train_data, open('F:/Projects/data/corpus/qa/CIPS-SOGOU/train_data.json', 'w', encoding='utf-8'), indent=4)
-    json.dump(valid_data, open('F:/Projects/data/corpus/qa/CIPS-SOGOU/valid_data.json', 'w', encoding='utf-8'), indent=4)
+    json.dump(train_data, open('E:/data/corpus/qa/CIPS-SOGOU/train_data.json', 'w', encoding='utf-8'), indent=4)
+    json.dump(valid_data, open('E:/data/corpus/qa/CIPS-SOGOU/valid_data.json', 'w', encoding='utf-8'), indent=4)
 
 process_data()
 
@@ -94,9 +95,9 @@ def collate_fn(batch):
     batch_segment_ids = torch.tensor(sequence_padding(batch_segment_ids), dtype=torch.long, device=device)
     return [batch_token_ids, batch_segment_ids], [batch_token_ids, batch_segment_ids]
 
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/qa/CIPS-SOGOU/train_data.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/qa/CIPS-SOGOU/train_data.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/qa/CIPS-SOGOU/valid_data.json')
+valid_dataset = MyDataset('E:/data/corpus/qa/CIPS-SOGOU/valid_data.json')
 valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn) 
 
 model = build_transformer_model(
@@ -105,7 +106,7 @@ model = build_transformer_model(
     with_mlm=True,
     application='unilm',
     keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-    dynamic_inherit=True
+    add_trainer=True
 ).to(device)
 summary(model, input_data=[next(iter(train_dataloader))[0]])
 
@@ -212,7 +213,7 @@ class ReadingComprehension(AutoRegressiveDecoder):
             p_token_ids = tokenizer.encode(passage, maxlen=max_p_len)[0]
             q_token_ids = tokenizer.encode(question, maxlen=max_q_len + 1)[0]
             token_ids.append(p_token_ids + q_token_ids[1:])
-        output_ids = self.beam_search(token_ids, topk=topk, states=0)  # 基于beam search
+        output_ids = self.beam_search(token_ids, topk=topk, states=0)[0]  # 基于beam search
         return tokenizer.decode(output_ids.cpu().numpy())
 
 

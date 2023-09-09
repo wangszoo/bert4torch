@@ -8,7 +8,9 @@ import numpy as np
 from bert4torch.layers import LayerNorm
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, AdversarialTraining
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
+from bert4torch.callbacks import AdversarialTraining
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -17,14 +19,14 @@ import torch.nn as nn
 
 maxlen = 256
 batch_size = 8
-config_path = 'F:/Projects/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[hit_torch_base]--chinese-bert-wwm-ext/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载标签字典
 predicate2id, id2predicate = {}, {}
-with open('F:/Projects/data/corpus/relation_extraction/chip2020/53_schemas.json', encoding='utf-8') as f:
+with open('E:/data/corpus/relation_extraction/chip2020/53_schemas.json', encoding='utf-8') as f:
     for l in f:
         l = json.loads(l)
         if l['predicate'] not in predicate2id:
@@ -92,8 +94,8 @@ class MyDataset(ListDataset):
 
 
 # 虚拟对抗添加
-train_dataset = MyDataset('F:/Projects/data/corpus/relation_extraction/chip2020/train_data.json')
-valid_dataset = MyDataset('F:/Projects/data/corpus/relation_extraction/chip2020/val_data.json')
+train_dataset = MyDataset('E:/data/corpus/relation_extraction/chip2020/train_data.json')
+valid_dataset = MyDataset('E:/data/corpus/relation_extraction/chip2020/val_data.json')
 unsup_dataset = [sen for sen in (train_dataset.data + valid_dataset.data)]
 
 def collate_fn(batch):
@@ -162,7 +164,7 @@ class Model(BaseModel):
         subject = torch.cat([start, end], 2)
         return subject[:, 0]
 
-    def forward(self, inputs):
+    def forward(self, *inputs):
         # 预测subject
         seq_output = self.bert(inputs[:2])  # [btz, seq_len, hdsz]
         subject_preds = (torch.sigmoid(self.linear1(seq_output))) ** 2  # [btz, seq_len, 2]
@@ -173,7 +175,7 @@ class Model(BaseModel):
         # 理论上应该用LayerNorm前的，但是这样只能返回各个block顶层输出，这里和keras实现不一致
         sup_split = subject_ids.shape[0]
         subject = self.extract_subject([seq_output[:sup_split], subject_ids])
-        output = self.condLayerNorm([seq_output[:sup_split], subject])
+        output = self.condLayerNorm(seq_output[:sup_split], subject)
         output = (torch.sigmoid(self.linear2(output))) ** 4
         object_preds = output.reshape(*output.shape[:2], len(predicate2id), 2)
 
@@ -191,7 +193,7 @@ class Model(BaseModel):
         with torch.no_grad():
             seq_output, subject_ids = inputs
             subject = self.extract_subject([seq_output, subject_ids])
-            output = self.condLayerNorm([seq_output, subject])
+            output = self.condLayerNorm(seq_output, subject)
             output = (torch.sigmoid(self.linear2(output))) ** 4
             object_preds = output.reshape(*output.shape[:2], len(predicate2id), 2)
         return object_preds
@@ -349,7 +351,7 @@ class Evaluator(Callback):
 if __name__ == '__main__':
     evaluator = Evaluator()
     adversarial_train = AdversarialTraining('vat')
-    train_model.fit(train_dataloader, steps_per_epoch=None, epochs=20, callbacks=[evaluator])
+    train_model.fit(train_dataloader, steps_per_epoch=None, epochs=20, callbacks=[evaluator, adversarial_train])
 else:
     train_model.load_weights('best_model2.pt')
 

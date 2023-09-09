@@ -2,20 +2,28 @@
 # SimBERT/RoFormer-Sim测试相似问生成效果，以及句子之间相似度效果
 # 官方项目：https://github.com/ZhuiyiTechnology/simbert
 # 官方项目：https://github.com/ZhuiyiTechnology/roformer-sim
+# simbert权重转换脚本可见：https://github.com/Tongjilibo/bert4torch/blob/master/convert_script/convert_simbert.py
 
 import torch
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, AutoRegressiveDecoder, get_pool_emb
+from bert4torch.snippets import sequence_padding, get_pool_emb
+from bert4torch.generation import AutoRegressiveDecoder
 from bert4torch.tokenizers import Tokenizer, load_vocab
 
 # 基本信息
 maxlen = 32
-choice = 'simbert_v2'  # simbert simbert_v2
-if choice == 'simbert':
-    args_model_path = "F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base"
+choice = 'simbert_tiny'  # simbert_tiny, simbert_small, simbert_base simbert_v2
+if choice == 'simbert_tiny':
+    args_model_path = "E:/pretrain_ckpt/simbert/[sushen_torch_tiny]--simbert_chinese_tiny"
     args_model = 'bert'
-else:
-    args_model_path = "F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base"
+elif choice == 'simbert_small':
+    args_model_path = "E:/pretrain_ckpt/simbert/[sushen_torch_small]--simbert_chinese_small"
+    args_model = 'bert'
+elif choice == 'simbert_base':
+    args_model_path = "E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base"
+    args_model = 'bert'
+elif choice == 'simbert_v2':
+    args_model_path = "E:/pretrain_ckpt/simbert/[sushen_torch_base]--roformer_chinese_sim_char_base"
     args_model = 'roformer'
 
 # 加载simbert权重或roformer_v2
@@ -48,7 +56,7 @@ class Model(BaseModel):
         sen_emb = get_pool_emb(hidden_state, pooler, token_ids.gt(0).long(), self.pool_method)
         return seq_logit, sen_emb
 
-model = Model(pool_method='cls').to(device)
+model = Model(pool_method='pooler').to(device)
 
 class SynonymsGenerator(AutoRegressiveDecoder):
     """seq2seq解码器
@@ -63,7 +71,7 @@ class SynonymsGenerator(AutoRegressiveDecoder):
 
     def generate(self, text, n=1, topk=5):
         token_ids, segment_ids = tokenizer.encode(text, maxlen=maxlen)
-        output_ids = self.random_sample([token_ids, segment_ids], n, topk)  # 基于随机采样
+        output_ids = self.random_sample([token_ids, segment_ids], n=n, topk=topk)  # 基于随机采样
         return [tokenizer.decode(ids.cpu().numpy()) for ids in output_ids]
 
 

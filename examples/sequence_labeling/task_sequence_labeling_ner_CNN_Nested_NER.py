@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.nn as nn
-from bert4torch.snippets import sequence_padding, Callback, ListDataset, seed_everything
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset, seed_everything
 from bert4torch.optimizers import get_linear_schedule_with_warmup
 from bert4torch.layers import LayerNorm
 from bert4torch.tokenizers import Tokenizer
@@ -36,9 +37,9 @@ logit_drop = 0
 cnn_depth = 3
 
 # BERT base
-config_path = 'F:/Projects/pretrain_ckpt/bert/[huggingface_torch_base]--bert-base-chinese/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[huggingface_torch_base]--bert-base-chinese/bert4torch_pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[huggingface_torch_base]--bert-base-chinese/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_torch_base]--bert-base-chinese/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_torch_base]--bert-base-chinese/bert4torch_pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_torch_base]--bert-base-chinese/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 固定seed
@@ -128,8 +129,8 @@ def collate_fn(data):
     return [tokens_ids, indexes], [matrix, ent_target]
 
 # 加载数据
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/ner/china-people-daily-ner-corpus/example.train'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/ner/china-people-daily-ner-corpus/example.dev'), batch_size=batch_size, collate_fn=collate_fn) 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/ner/china-people-daily-ner-corpus/example.train'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
+valid_dataloader = DataLoader(MyDataset('E:/data/corpus/ner/china-people-daily-ner-corpus/example.dev'), batch_size=batch_size, collate_fn=collate_fn) 
 
 class MaskConv2d(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size=3, padding=1, groups=1):

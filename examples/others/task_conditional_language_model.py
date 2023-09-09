@@ -3,10 +3,11 @@
 # 按类随机生成文本，这个demo的类别是情感极性（正／负）
 # 请参考：https://kexue.fm/archives/7124
 
-from pydantic import NoneStrBytes
 from bert4torch.models import build_transformer_model, BaseModel
 from bert4torch.tokenizers import Tokenizer, load_vocab
-from bert4torch.snippets import sequence_padding, text_segmentate, Callback, AutoRegressiveDecoder, ListDataset
+from bert4torch.snippets import sequence_padding, text_segmentate, ListDataset
+from bert4torch.callbacks import Callback
+from bert4torch.generation import AutoRegressiveDecoder
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.optim as optim
@@ -20,9 +21,9 @@ num_classes = 2
 epochs = 20
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载并精简词表，建立分词器
@@ -67,26 +68,27 @@ def collate_fn(batch):
 
 # 加载数据集
 train_dataloader = DataLoader(MyDataset([
-    'F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.train.data',
-    'F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.valid.data',
-    'F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.test.data']), 
+    'E:/data/corpus/sentence_classification/sentiment/sentiment.train.data',
+    'E:/data/corpus/sentence_classification/sentiment/sentiment.valid.data',
+    'E:/data/corpus/sentence_classification/sentiment/sentiment.test.data']), 
     batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
 # 定义bert上的模型结构
 class Model(BaseModel):
     def __init__(self) -> None:
         super().__init__()
-        c = nn.Embedding(num_classes, 128)
+        self.c = nn.Embedding(num_classes, 128)
         self.bert = build_transformer_model(config_path,
                                             checkpoint_path,
                                             with_mlm=True,
                                             application='lm',
                                             keep_tokens=keep_tokens,  # 只保留keep_tokens中的字，精简原字表
-                                            layer_norm_cond=c,
+                                            conditional_size=128,
                                             ignore_invalid_weights=True)  # 忽略未初始化的权重
 
-    def forward(self, inputs):
-        _, seq_output = self.bert(inputs)  # [btz, seq_len, vocab_size]
+    def forward(self, token_ids, segment_ids, labels):
+        conditional_emb = self.c(labels)
+        _, seq_output = self.bert([token_ids, segment_ids, conditional_emb])  # [btz, seq_len, vocab_size]
         return seq_output
 
 model = Model().to(device)
@@ -113,7 +115,7 @@ class RandomSentiment(AutoRegressiveDecoder):
         return model.predict([token_ids, segment_ids, label])[:, -1, :]
 
     def generate(self, label, n=1, topp=0.95):
-        results = self.random_sample([[label]], n, topp=topp)  # 基于随机采样
+        results = self.random_sample([[label]], n=n, topp=topp)  # 基于随机采样
         return [tokenizer.decode(ids.cpu().numpy()) for ids in results]
 
 

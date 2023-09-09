@@ -14,15 +14,16 @@ from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model
 from torch.optim import Adam
 import torch.nn.functional as F
-from bert4torch.snippets import sequence_padding, ListDataset, Callback
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
 from torch.utils.data import DataLoader
 
 num_classes = 2
 maxlen = 256
 batch_size = 16
-config_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 choice = 'semi-sup'  # zero-shot1, zero-shot2, few-shot, semi-sup
 
@@ -35,9 +36,9 @@ def load_data(filename):
     return D
 
 # 加载数据集
-train_data = load_data('F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.train.data')
-valid_data = load_data('F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.valid.data')
-test_data = load_data('F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.test.data')
+train_data = load_data('E:/data/corpus/sentence_classification/sentiment/sentiment.train.data')
+valid_data = load_data('E:/data/corpus/sentence_classification/sentiment/sentiment.valid.data')
+test_data = load_data('E:/data/corpus/sentence_classification/sentiment/sentiment.test.data')
 
 # 模拟标注和非标注数据
 train_frac = 0.01  # 标注数据的比例
@@ -116,7 +117,7 @@ valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=v
 test_dataloader = DataLoader(test_dataset,  batch_size=batch_size, collate_fn=test_dataset.collate_fn) 
 
 # 加载预训练模型
-model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, with_mlm=True, dynamic_inherit=True).to(device)
+model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, with_mlm=True, add_trainer=True).to(device)
 
 class MyLoss(nn.CrossEntropyLoss):
     def __init__(self, **kwargs):

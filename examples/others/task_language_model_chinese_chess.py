@@ -4,16 +4,18 @@
 # 数据：https://github.com/bojone/gpt_cchess
 # 模型训练可以在python2/python3进行。但是cchess模块只支持python3，
 # 因此如果需要交互式体验模型棋力，那么需要在python3下进行。
-# 权重转换脚本见：https://github.com/Tongjilibo/bert4torch/blob/master/examples/convert_script/convert_roberta_chess.py
+# 权重转换脚本见：https://github.com/Tongjilibo/bert4torch/blob/master/convert_script/convert_roberta_chess.py
 
 import json
 import numpy as np
+import bert4torch
 from bert4torch.models import build_transformer_model
 from bert4torch.tokenizers import Tokenizer, load_vocab
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from bert4torch.snippets import sequence_padding, ListDataset, Callback
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
 from cchess import *
 
 # 基本信息
@@ -23,9 +25,9 @@ epochs = 10000
 batch_size = 16
 
 # bert配置
-config_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
@@ -82,11 +84,11 @@ def collate_fn(batch):
     return [batch_token_ids, batch_segment_ids], batch_token_ids
 
 # 加载数据集
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/seq2seq/qipu/qipu.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/seq2seq/qipu/qipu.json'), batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
 
-# 由于字典中0不代表padding位，为避免attention_mask计算错误，这里token_pad_ids=-100
+# 由于字典中0不代表padding位，为避免attention_mask计算错误，这里pad_token_id=-100
 model = build_transformer_model(config_path, checkpoint_path, application='lm', with_mlm=True,
-                                keep_tokens=keep_tokens, token_pad_ids=-100, dynamic_inherit=True).to(device)
+                                keep_tokens=keep_tokens, pad_token_id=-100, add_trainer=True).to(device)
 
 class CrossEntropyLoss(nn.CrossEntropyLoss):
     def __init__(self, **kwargs):

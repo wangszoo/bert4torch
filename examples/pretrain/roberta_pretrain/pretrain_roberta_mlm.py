@@ -3,7 +3,8 @@
 # 改DDP需几行代码，参考https://github.com/Tongjilibo/bert4torch/blob/master/examples/training_trick/task_distributed_data_parallel.py
 
 from bert4torch.models import build_transformer_model
-from bert4torch.snippets import sequence_padding, Callback
+from bert4torch.snippets import sequence_padding
+from bert4torch.callbacks import Callback
 from bert4torch.optimizers import get_linear_schedule_with_warmup
 from torch.utils.data import Dataset
 import torch.nn as nn
@@ -25,8 +26,8 @@ task_name = 'roberta'
 # 其他配置
 maxlen = 512
 batch_size = 7
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'  # 如果从零训练，就设为None
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'  # 如果从零训练，就设为None
 learning_rate = 0.00176
 weight_decay_rate = 0.01  # 权重衰减
 num_warmup_steps = 3125
@@ -95,7 +96,7 @@ def get_train_dataloader():
     return train_dataloader
 train_dataloader = get_train_dataloader()
 
-model = build_transformer_model(config_path, checkpoint_path, segment_vocab_size=0, with_mlm=True, dynamic_inherit=True).to(device)
+model = build_transformer_model(config_path, checkpoint_path, segment_vocab_size=0, with_mlm=True, add_trainer=True).to(device)
 
 # weight decay
 param_optimizer = list(model.named_parameters())

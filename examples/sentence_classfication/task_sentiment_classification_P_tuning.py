@@ -10,15 +10,16 @@ import numpy as np
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
 from torch.optim import Adam
-from bert4torch.snippets import sequence_padding, ListDataset, Callback
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
 from torch.utils.data import DataLoader
 from torchinfo import summary
 
 maxlen = 256
 batch_size = 16
-config_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/bert4torch_pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
+checkpoint_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/bert4torch_pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 choice = 'finetune_all'  # finetune_all finetune_few
 
@@ -31,9 +32,9 @@ def load_data(filename):
     return D
 
 # 加载数据集
-train_data = load_data('F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.train.data')
-valid_data = load_data('F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.valid.data')
-test_data = load_data('F:/Projects/data/corpus/sentence_classification/sentiment/sentiment.test.data')
+train_data = load_data('E:/data/corpus/sentence_classification/sentiment/sentiment.train.data')
+valid_data = load_data('E:/data/corpus/sentence_classification/sentiment/sentiment.valid.data')
+test_data = load_data('E:/data/corpus/sentence_classification/sentiment/sentiment.test.data')
 
 # 模拟标注和非标注数据
 train_frac = 0.01  # 标注数据的比例
@@ -83,7 +84,7 @@ class MyDataset(ListDataset):
             if label != 2:
                 token_ids = token_ids[:1] + desc_ids + token_ids[1:]
                 segment_ids = [0] * len(desc_ids) + segment_ids
-            if self.kwargs['random']:
+            if self.kwargs['random']:  # 对部分token_ids转为[mask]
                 source_ids, target_ids = random_masking(token_ids)
             else:
                 source_ids, target_ids = token_ids[:], token_ids[:]
@@ -139,7 +140,7 @@ if choice == 'finetune_few':
     summary(model, input_data=next(iter(train_dataloader))[0])
 elif choice == 'finetune_all':
     # 全部权重一起训练
-    model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, with_mlm=True, dynamic_inherit=True).to(device)
+    model = build_transformer_model(config_path=config_path, checkpoint_path=checkpoint_path, with_mlm=True, add_trainer=True).to(device)
     summary(model, input_data=[next(iter(train_dataloader))[0]])
 
 # 定义使用的loss和optimizer，这里支持自定义

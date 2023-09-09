@@ -1,5 +1,6 @@
 #! -*- coding:utf-8 -*-
 # 三元组抽取任务，基于“半指针-半标注”结构
+# 思路：两阶段关系抽取，先抽取出句子中的主语，再通过指针网络抽取出主语对应的关系和宾语
 # 文章介绍：https://kexue.fm/archives/7161
 # 数据集：http://ai.baidu.com/broad/download?dataset=sked
 
@@ -8,7 +9,8 @@ import numpy as np
 from bert4torch.layers import LayerNorm
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, ListDataset
+from bert4torch.snippets import sequence_padding, ListDataset
+from bert4torch.callbacks import Callback
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -17,15 +19,15 @@ import torch.nn as nn
 
 maxlen = 128
 batch_size = 64
-config_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载标签字典
 predicate2id, id2predicate = {}, {}
 
-with open('F:/Projects/data/corpus/relation_extraction/BD_Knowledge_Extraction/all_50_schemas', encoding='utf-8') as f:
+with open('E:/data/corpus/relation_extraction/BD_Knowledge_Extraction/all_50_schemas', encoding='utf-8') as f:
     for l in f:
         l = json.loads(l)
         if l['predicate'] not in predicate2id:
@@ -120,9 +122,9 @@ def collate_fn(batch):
     batch_attention_mask = (batch_token_ids != tokenizer._token_pad_id)
     return [batch_token_ids, batch_segment_ids, batch_subject_ids], [batch_subject_labels, batch_object_labels, batch_attention_mask]
 
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/relation_extraction/BD_Knowledge_Extraction/train_data.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/relation_extraction/BD_Knowledge_Extraction/train_data.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/relation_extraction/BD_Knowledge_Extraction/dev_data.json')
+valid_dataset = MyDataset('E:/data/corpus/relation_extraction/BD_Knowledge_Extraction/dev_data.json')
 valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn) 
 
 
@@ -145,7 +147,7 @@ class Model(BaseModel):
         subject = torch.cat([start, end], 2)
         return subject[:, 0]
 
-    def forward(self, inputs):
+    def forward(self, *inputs):
         # 预测subject
         seq_output = self.bert(inputs[:2])  # [btz, seq_len, hdsz]
         subject_preds = (torch.sigmoid(self.linear1(seq_output)))**2  # [btz, seq_len, 2]
@@ -155,7 +157,7 @@ class Model(BaseModel):
         subject_ids = inputs[2]
         # 理论上应该用LayerNorm前的，但是这样只能返回各个block顶层输出，这里和keras实现不一致
         subject = self.extract_subject([seq_output, subject_ids])
-        output = self.condLayerNorm([seq_output, subject])
+        output = self.condLayerNorm(seq_output, subject)
         output = (torch.sigmoid(self.linear2(output)))**4
         object_preds = output.reshape(*output.shape[:2], len(predicate2id), 2)
 
@@ -173,7 +175,7 @@ class Model(BaseModel):
         with torch.no_grad():
             seq_output, subject_ids = inputs
             subject = self.extract_subject([seq_output, subject_ids])
-            output = self.condLayerNorm([seq_output, subject])
+            output = self.condLayerNorm(seq_output, subject)
             output = (torch.sigmoid(self.linear2(output)))**4
             object_preds = output.reshape(*output.shape[:2], len(predicate2id), 2)
         return object_preds

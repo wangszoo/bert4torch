@@ -12,7 +12,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from bert4torch.tokenizers import Tokenizer, load_vocab
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import ListDataset, sequence_padding, Callback
+from bert4torch.snippets import ListDataset, sequence_padding
+from bert4torch.callbacks import Callback
 from torch.utils.data import DataLoader
 from scipy.stats import pearsonr, spearmanr
 import numpy as np
@@ -46,17 +47,17 @@ else:
 
 # bert配置
 model_dir = {
-    'BERT': 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12',
-    'RoBERTa': 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base',
-    'NEZHA': 'F:/Projects/pretrain_ckpt/nezha/[huawei_noah_torch_base]--nezha-cn-base',
-    'RoFormer': 'F:/Projects/pretrain_ckpt/roformer/[sushen_torch_base]--roformer_v1_base',
-    'SimBERT': 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base',
+    'BERT': 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12',
+    'RoBERTa': 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base',
+    'NEZHA': 'E:/pretrain_ckpt/nezha/[huawei_noah_torch_base]--nezha-cn-base',
+    'RoFormer': 'E:/pretrain_ckpt/roformer/[sushen_torch_base]--roformer_v1_base',
+    'SimBERT': 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base',
 }[model_type]
 
 config_path = f'{model_dir}/bert_config.json' if model_type == 'BERT' else f'{model_dir}/config.json'
 checkpoint_path = f'{model_dir}/pytorch_model.bin'
 dict_path = f'{model_dir}/vocab.txt'
-data_path = 'F:/Projects/data/corpus/sentence_embedding/'
+data_path = 'E:/data/corpus/sentence_embedding/'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # =============================加载数据集=============================
@@ -194,19 +195,17 @@ class Evaluator(Callback):
     
     @staticmethod
     def evaluate(data):
-        embeddings1, embeddings2, labels = [], [], []
-        for (text1_ids, text2_ids), label in data:
-            embeddings1.append(model.predict(text1_ids))
-            embeddings2.append(model.predict(text2_ids))
-            labels.append(label)
+        cosine_scores, labels = [], []
+        for (text1_ids, text2_ids), label in tqdm(data, desc='Evaluate'):
+            embeddings1 = model.predict(text1_ids)
+            embeddings2 = model.predict(text2_ids)
+            cosine_score = F.cosine_similarity(embeddings1, embeddings2).cpu().numpy()
+            cosine_scores.append(cosine_score)
+            labels.append(label.cpu().numpy())
 
-        embeddings1 = torch.cat(embeddings1)
-        embeddings2 = torch.cat(embeddings2)
-        labels = torch.cat(labels)
-
-        sims = F.cosine_similarity(embeddings1, embeddings2).cpu().numpy()
-        labels = labels.cpu().numpy()
-        return spearmanr(sims, labels)[0]
+        labels = np.concatenate(labels)
+        cosine_scores = np.concatenate(cosine_scores)
+        return spearmanr(cosine_scores, labels)[0]
 
 if __name__ == "__main__":
     evaluator = Evaluator()

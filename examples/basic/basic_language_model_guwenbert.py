@@ -6,7 +6,7 @@ from bert4torch.tokenizers import Tokenizer
 import torch
 
 # 加载模型，请更换成自己的路径
-root_model_path = "F:/Projects/pretrain_ckpt/robert/[guwen_hf_torch_base]--ethanyt-guwenbert-base"
+root_model_path = "E:/pretrain_ckpt/roberta/[guwen_hf_torch_base]--ethanyt-guwenbert-base"
 vocab_path = root_model_path + "/vocab.txt"
 config_path = root_model_path + "/config.json"
 checkpoint_path = root_model_path + '/bert4torch_pytorch_model.bin'
@@ -14,7 +14,7 @@ checkpoint_path = root_model_path + '/bert4torch_pytorch_model.bin'
 
 # 建立分词器
 tokenizer = Tokenizer(vocab_path, do_lower_case=True)
-model = build_transformer_model(config_path, checkpoint_path, with_mlm='softmax', token_pad_ids=1, custom_position_ids='start_at_padding')  # 建立模型，加载权重
+model = build_transformer_model(config_path, checkpoint_path, with_mlm='softmax', pad_token_id=1, custom_position_ids='start_at_padding')  # 建立模型，加载权重
 
 token_ids, segments_ids = tokenizer.encode("晋太元中，武陵人捕鱼为业。")
 token_ids[1] = tokenizer._token_mask_id

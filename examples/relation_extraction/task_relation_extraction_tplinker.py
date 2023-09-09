@@ -6,7 +6,8 @@
 import json
 from bert4torch.tokenizers import Tokenizer
 from bert4torch.models import build_transformer_model, BaseModel
-from bert4torch.snippets import sequence_padding, Callback, ListDataset
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, ListDataset
 from bert4torch.layers import TplinkerHandshakingKernel
 from tqdm import tqdm
 import torch
@@ -14,24 +15,24 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import torch.optim as optim
 
-maxlen = 50
+maxlen = 64
 batch_size = 64
-config_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/config.json'
-checkpoint_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/pytorch_model.bin'
-dict_path = 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base/vocab.txt'
+config_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/bert_config.json'
+checkpoint_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/pytorch_model.bin'
+dict_path = 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12/vocab.txt'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 加载标签字典
 predicate2id, id2predicate = {}, {}
 
-with open('F:/Projects/data/corpus/relation_extraction/BD_Knowledge_Extraction/all_50_schemas', encoding='utf-8') as f:
+with open('E:/data/corpus/relation_extraction/BD_Knowledge_Extraction/all_50_schemas', encoding='utf-8') as f:
     for l in f:
         l = json.loads(l)
         if l['predicate'] not in predicate2id:
             id2predicate[len(predicate2id)] = l['predicate']
             predicate2id[l['predicate']] = len(predicate2id)
 
-# 建立分词器
+# 建立分词器 
 tokenizer = Tokenizer(dict_path, do_lower_case=True)
 
 # 加载数据集
@@ -104,9 +105,9 @@ def collate_fn(batch):
     batch_token_ids = torch.tensor(sequence_padding(batch_token_ids, length=maxlen), dtype=torch.long, device=device)
     return [batch_token_ids], [batch_entity_labels, batch_head_labels, batch_tail_labels]
     
-train_dataloader = DataLoader(MyDataset('F:/Projects/data/corpus/relation_extraction/BD_Knowledge_Extraction/train_data.json'), 
+train_dataloader = DataLoader(MyDataset('E:/data/corpus/relation_extraction/BD_Knowledge_Extraction/train_data.json'), 
                    batch_size=batch_size, shuffle=True, collate_fn=collate_fn) 
-valid_dataset = MyDataset('F:/Projects/data/corpus/relation_extraction/BD_Knowledge_Extraction/dev_data.json')
+valid_dataset = MyDataset('E:/data/corpus/relation_extraction/BD_Knowledge_Extraction/dev_data.json')
 valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn) 
 
 # 定义bert上的模型结构
@@ -120,7 +121,7 @@ class Model(BaseModel):
         self.tail_rel_fc = nn.Linear(768, len(predicate2id)*3)
         self.handshaking_kernel = TplinkerHandshakingKernel(768, shaking_type='cat')
 
-    def forward(self, inputs):
+    def forward(self, *inputs):
         last_hidden_state = self.bert(inputs)  # [btz, seq_len, hdsz]
         shaking_hiddens = self.handshaking_kernel(last_hidden_state)  # [btz, pair_len, hdsz]
         ent_shaking_outputs = self.ent_fc(shaking_hiddens)  # [btz, pair_len, 2]
@@ -150,7 +151,7 @@ class MyLoss(nn.CrossEntropyLoss):
 
         return {'loss': loss, 'entity_loss': loss_list[0], 'head_loss': loss_list[1], 'tail_loss': loss_list[2]}
 
-model.compile(loss=MyLoss(), optimizer=optim.Adam(model.parameters(), 5e-5))
+model.compile(loss=MyLoss(), optimizer=optim.Adam(model.parameters(), 1e-4))
 
 def extract_spoes(text):
     """抽取输入text所包含的三元组

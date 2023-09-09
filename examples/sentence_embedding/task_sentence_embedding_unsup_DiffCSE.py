@@ -9,7 +9,8 @@ import numpy as np
 import scipy.stats
 from bert4torch.models import build_transformer_model, BaseModel
 from bert4torch.tokenizers import Tokenizer
-from bert4torch.snippets import sequence_padding, Callback, get_pool_emb
+from bert4torch.callbacks import Callback
+from bert4torch.snippets import sequence_padding, get_pool_emb
 from torch.utils.data import DataLoader
 from torch import optim, nn
 import torch
@@ -47,17 +48,17 @@ lambda_weight = 0.05  # electra部分loss权重
 
 # bert配置
 model_dir = {
-    'BERT': 'F:/Projects/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12',
-    'RoBERTa': 'F:/Projects/pretrain_ckpt/robert/[hit_torch_base]--chinese-roberta-wwm-ext-base',
-    'NEZHA': 'F:/Projects/pretrain_ckpt/nezha/[huawei_noah_torch_base]--nezha-cn-base',
-    'RoFormer': 'F:/Projects/pretrain_ckpt/roformer/[sushen_torch_base]--roformer_v1_base',
-    'SimBERT': 'F:/Projects/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base',
+    'BERT': 'E:/pretrain_ckpt/bert/[google_tf_base]--chinese_L-12_H-768_A-12',
+    'RoBERTa': 'E:/pretrain_ckpt/roberta/[hit_torch_base]--chinese-roberta-wwm-ext-base',
+    'NEZHA': 'E:/pretrain_ckpt/nezha/[huawei_noah_torch_base]--nezha-cn-base',
+    'RoFormer': 'E:/pretrain_ckpt/roformer/[sushen_torch_base]--roformer_v1_base',
+    'SimBERT': 'E:/pretrain_ckpt/simbert/[sushen_torch_base]--simbert_chinese_base',
 }[model_type]
 
 config_path = f'{model_dir}/bert_config.json' if model_type == 'BERT' else f'{model_dir}/config.json'
 checkpoint_path = f'{model_dir}/pytorch_model.bin'
 dict_path = f'{model_dir}/vocab.txt'
-data_path = 'F:/Projects/data/corpus/sentence_embedding/'
+data_path = 'E:/data/corpus/sentence_embedding/'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # =============================加载数据集=============================
@@ -156,7 +157,7 @@ def collate_fn_eval(batch):
 valid_dataloader = DataLoader(ListDataset(data=all_texts), batch_size=batch_size, collate_fn=collate_fn_eval)
 
 # 定义generator
-generator = build_transformer_model(config_path, checkpoint_path, model=model_name, segment_vocab_size=0, dropout_rate=dropout_rate, with_mlm=True, dynamic_inherit=True)
+generator = build_transformer_model(config_path, checkpoint_path, model=model_name, segment_vocab_size=0, dropout_rate=dropout_rate, with_mlm=True, add_trainer=True)
 generator.to(device)
 generator.eval()
 
@@ -232,11 +233,11 @@ class Model(BaseModel):
         g_pred[:, 0] = tokenizer._token_start_id
         e_labels = (g_pred != input_ids) * attention_mask
         e_inputs = g_pred * attention_mask
-        # cls位置需要用句向量替换
-        embeddings = self.discriminator.apply_embeddings([e_inputs])
-        embeddings[0] = torch.cat([reps.unsqueeze(1), embeddings[0][:, 1:, :]], dim=1)
-        outputs = self.discriminator.apply_main_layers(embeddings)
-        mlm_outputs = self.discriminator.apply_final_layers(outputs)
+        # cls位置需要用句向量替换，从v0.2.8开始几个apply_的返回值是字典，修改了下格式
+        outputs = self.discriminator.apply_embeddings(e_inputs)
+        outputs['hidden_states'] = torch.cat([reps.unsqueeze(1), outputs['hidden_states'][:, 1:, :]], dim=1)
+        outputs = self.discriminator.apply_main_layers(**outputs)
+        mlm_outputs = self.discriminator.apply_final_layers(**outputs)
         prediction_scores = self.electra_head(mlm_outputs)
         return scores, prediction_scores, e_labels
     
